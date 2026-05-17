@@ -9,6 +9,7 @@ A KOReader plugin that syncs books from a Grimmory OPDS server to a local device
 - Basic-auth support for protected Grimmory instances.
 - Automatic downloads for missing books.
 - Manual metadata refresh for existing local books by safely re-downloading matched EPUB files.
+- Manual OTA update checks and installation from GitHub Releases.
 - Folder placement based on Grimmory genres/tags, including Manga, Serier, Light novels, Fiktion, Facklitteratur, and Lyrik.
 - Recent-download history with quick open from KOReader.
 
@@ -69,6 +70,14 @@ Menu -> Tools -> Grimmory Sync -> Refresh existing metadata
 
 This replaces matched local EPUB files with freshly downloaded copies from Grimmory. The replacement is conservative: the plugin downloads to a temporary file, verifies that it is not empty, backs up the existing file, and only then moves the new file into place.
 
+To update the plugin directly from KOReader, run:
+
+```text
+Menu -> Tools -> Grimmory Sync -> Check for updates
+```
+
+The updater checks the latest GitHub release, downloads `grimmory-sync.koplugin.zip`, extracts it over the installed plugin folder, and asks you to restart KOReader.
+
 Downloaded files are named as:
 
 ```text
@@ -82,6 +91,7 @@ Books are placed into subfolders according to tags/genres returned by the OPDS f
 - The current download implementation prefers EPUB acquisition links.
 - Local matching is filename-based and intentionally fuzzy around common punctuation and accents.
 - Metadata refresh currently refreshes all matched local books. It does not yet compare per-book metadata hashes or `updated` timestamps.
+- OTA updates require a release asset named `grimmory-sync.koplugin.zip`.
 - The folder placement rules are tailored for a Swedish personal library layout. Adjust `generateTargetPath()` if your taxonomy differs.
 - KOReader must have network access to the Grimmory server.
 - Existing `booklore_sync_settings.txt` and `booklore_sync_history.lua` files are read as legacy fallbacks, but new saves use `grimmory_sync_*` files.

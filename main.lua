@@ -6,6 +6,7 @@ local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local logger = require("logger")
 local _ = require("gettext")
 local dump = require("dump")
+local Updater = require("grimmory_updater")
 
 local GrimmorySync = WidgetContainer:new{
     name = "grimmorysync",
@@ -204,6 +205,12 @@ function GrimmorySync:addToMainMenu(menu_items)
                 text = _("Refresh existing metadata"),
                 callback = function()
                     self:startMetadataRefresh()
+                end,
+            },
+            {
+                text = _("Check for updates"),
+                callback = function()
+                    Updater.checkForUpdates()
                 end,
             },
             {
