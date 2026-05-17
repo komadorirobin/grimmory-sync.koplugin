@@ -1463,7 +1463,7 @@ end
 function GrimmorySync:showProgressDialog(text)
     -- Always close and create new dialog since InfoMessage doesn't have setText
     if self.progress_dialog then
-        UIManager:close(self.progress_dialog)
+        self:closeProgressDialog()
     end
     
     self.progress_dialog = InfoMessage:new{
@@ -1482,8 +1482,12 @@ end
 
 function GrimmorySync:closeProgressDialog()
     if self.progress_dialog then
-        UIManager:close(self.progress_dialog)
+        local dialog = self.progress_dialog
         self.progress_dialog = nil
+        -- Programmatic closes happen whenever the plugin advances to a new
+        -- progress message. They must not be interpreted as a user cancel.
+        dialog.dismiss_callback = nil
+        UIManager:close(dialog)
     end
 end
 
