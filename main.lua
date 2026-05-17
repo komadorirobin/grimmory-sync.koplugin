@@ -12,6 +12,7 @@ local GrimmorySync = WidgetContainer:new{
     name = "grimmorysync",
     is_doc_only = false,
     abort_sync = false,
+    abort_notified = false,
 }
 
 local SETTINGS_FILE = "/storage/emulated/0/koreader/grimmory_sync_settings.txt"
@@ -1093,6 +1094,7 @@ function GrimmorySync:compareAndDownload(local_books, remote_books)
             if path then
                 self:storeManifestEntry(manifest, path, book)
                 manifest_changed = true
+                self:saveManifest(manifest)
             end
         end
     end
@@ -1104,7 +1106,7 @@ function GrimmorySync:compareAndDownload(local_books, remote_books)
     return count, nil
 end
 
-function GrimmorySync:refreshExistingMetadata(local_books, remote_books)
+function GrimmorySync:buildMetadataRefreshQueue(local_books, remote_books)
     local local_index = self:buildLocalBookIndex(local_books)
     local manifest = self:loadManifest()
     local matched = {}
@@ -1132,6 +1134,12 @@ function GrimmorySync:refreshExistingMetadata(local_books, remote_books)
         end
     end
 
+    return matched, skipped, manifest
+end
+
+function GrimmorySync:refreshExistingMetadata(local_books, remote_books)
+    local matched, skipped, manifest = self:buildMetadataRefreshQueue(local_books, remote_books)
+
     if #matched == 0 then
         return 0, nil, skipped
     end
@@ -1155,11 +1163,80 @@ function GrimmorySync:refreshExistingMetadata(local_books, remote_books)
         if self:downloadBook(item.remote, item.local_path, { record_history = false }) then
             count = count + 1
             self:storeManifestEntry(manifest, item.local_path, item.remote)
+            self:saveManifest(manifest)
         end
     end
 
     self:saveManifest(manifest)
     return count, nil, skipped
+end
+
+function GrimmorySync:refreshExistingMetadataAsync(matched, skipped, manifest, done_callback)
+    local total = #matched
+    local count = 0
+    local i = 0
+    manifest = manifest or self:loadManifest()
+
+    if total == 0 then
+        done_callback(true, { refreshed = 0, skipped = skipped or 0, remaining = 0 })
+        return
+    end
+
+    local function finish(success, result)
+        self:saveManifest(manifest)
+        done_callback(success, result)
+    end
+
+    local function step()
+        if self.abort_sync then
+            logger.info("[GrimmorySync] Metadata refresh aborted by user")
+            finish(false, {
+                error = "Avbruten",
+                refreshed = count,
+                skipped = skipped or 0,
+                remaining = total - count,
+            })
+            return
+        end
+
+        i = i + 1
+        if i > total then
+            finish(true, {
+                refreshed = count,
+                skipped = skipped or 0,
+                remaining = 0,
+            })
+            return
+        end
+
+        local item = matched[i]
+        self:showProgressDialog(string.format(
+            "Uppdaterar metadata %d av %d...\n\n%s\n\nUppdaterade: %d\nHoppade över oförändrade: %d\n\nTryck för att avbryta",
+            i,
+            total,
+            item.remote.title,
+            count,
+            skipped or 0
+        ))
+
+        UIManager:nextTick(function()
+            if self.abort_sync then
+                UIManager:scheduleIn(0, step)
+                return
+            end
+
+            local downloaded = self:downloadBook(item.remote, item.local_path, { record_history = false })
+            if downloaded then
+                count = count + 1
+                self:storeManifestEntry(manifest, item.local_path, item.remote)
+                self:saveManifest(manifest)
+            end
+
+            UIManager:scheduleIn(0, step)
+        end)
+    end
+
+    UIManager:scheduleIn(0, step)
 end
 
 function GrimmorySync:buildCalibrePath(book)
@@ -1285,21 +1362,51 @@ function GrimmorySync:downloadBook(book, target_path, options)
         logger.err("[GrimmorySync] Cannot create:", tmp_path)
         return false
     end
+    local file_closed = false
+    local function closeFile()
+        if not file_closed then
+            file:close()
+            file_closed = true
+        end
+    end
+    local function abortableSink(chunk, err)
+        if self.abort_sync then
+            closeFile()
+            return nil, "aborted"
+        end
+        if chunk then
+            local ok_write, write_err = file:write(chunk)
+            if not ok_write then
+                closeFile()
+                return nil, write_err
+            end
+        elseif err then
+            closeFile()
+            return nil, err
+        else
+            closeFile()
+        end
+        return 1
+    end
     
     -- Download using appropriate protocol
     local request_func = download_url:match("^https://") and (ok_https and https.request or http.request) or http.request
     
     local success, status_code, response_headers = request_func{
         url = download_url,
-        sink = ltn12.sink.file(file),
+        sink = abortableSink,
         headers = headers,
     }
-    
-    -- Note: ltn12.sink.file closes the file automatically, so we don't close it manually
+    closeFile()
     
     -- Check result
     if not success or (type(status_code) == "number" and status_code ~= 200) then
         logger.err("[GrimmorySync] Download failed:", status_code or "unknown error")
+        pcall(os.remove, tmp_path)
+        return false
+    end
+    if self.abort_sync then
+        logger.info("[GrimmorySync] Download aborted by user")
         pcall(os.remove, tmp_path)
         return false
     end
@@ -1343,6 +1450,16 @@ function GrimmorySync:downloadBook(book, target_path, options)
     return true, full_path
 end
 
+function GrimmorySync:requestAbort(message)
+    self.abort_sync = true
+    if self.abort_notified then return end
+    self.abort_notified = true
+    UIManager:show(InfoMessage:new{
+        text = message or _("Avbryter efter pågående nedladdning..."),
+        timeout = 2,
+    })
+end
+
 function GrimmorySync:showProgressDialog(text)
     -- Always close and create new dialog since InfoMessage doesn't have setText
     if self.progress_dialog then
@@ -1352,7 +1469,13 @@ function GrimmorySync:showProgressDialog(text)
     self.progress_dialog = InfoMessage:new{
         text = text,
         timeout = nil,  -- No auto-close
+        dismiss_callback = function()
+            self:requestAbort(_("Avbryter efter pågående nedladdning..."))
+        end,
     }
+    self.progress_dialog.dismiss_callback = function()
+        self:requestAbort(_("Avbryter efter pågående nedladdning..."))
+    end
     UIManager:show(self.progress_dialog)
     UIManager:forceRePaint()
 end
@@ -1378,6 +1501,7 @@ function GrimmorySync:startSync()
     
     -- Reset abort flag
     self.abort_sync = false
+    self.abort_notified = false
     
     -- Show confirmation with cancel option
     UIManager:show(ConfirmBox:new{
@@ -1403,6 +1527,7 @@ function GrimmorySync:startMetadataRefresh()
     end
 
     self.abort_sync = false
+    self.abort_notified = false
 
     UIManager:show(ConfirmBox:new{
         text = _("Uppdatera metadata i befintliga böcker?\n\nPluginet laddar om matchade EPUB-filer från Grimmory och ersätter lokala filer först efter att nedladdningen har verifierats. Saknade böcker laddas inte ner här."),
@@ -1418,16 +1543,10 @@ function GrimmorySync:performSync()
     self:showProgressDialog("Skannar lokala böcker...")
     
     local ok, success, count_or_err = pcall(function()
-        -- Add abort button to progress dialog
         UIManager:scheduleIn(0.1, function()
             if self.progress_dialog then
                 self.progress_dialog.dismiss_callback = function()
-                    self.abort_sync = true
-                    self:closeProgressDialog()
-                    UIManager:show(InfoMessage:new{
-                        text = _("Synk avbruten"),
-                        timeout = 2,
-                    })
+                    self:requestAbort(_("Synk avbryts efter pågående nedladdning..."))
                 end
             end
         end)
@@ -1505,20 +1624,7 @@ end
 function GrimmorySync:performMetadataRefresh()
     self:showProgressDialog("Skannar lokala böcker...")
 
-    local ok, success, count_or_err = pcall(function()
-        UIManager:scheduleIn(0.1, function()
-            if self.progress_dialog then
-                self.progress_dialog.dismiss_callback = function()
-                    self.abort_sync = true
-                    self:closeProgressDialog()
-                    UIManager:show(InfoMessage:new{
-                        text = _("Metadatauppdatering avbruten"),
-                        timeout = 2,
-                    })
-                end
-            end
-        end)
-
+    local ok, success, payload = pcall(function()
         local local_books = self:scanLocalBooks()
         logger.info("[GrimmorySync] Local books found:", #local_books)
 
@@ -1544,18 +1650,16 @@ function GrimmorySync:performMetadataRefresh()
         logger.info("[GrimmorySync] Remote books found:", #remote_books)
 
         self:showProgressDialog(string.format(
-            "Matchar befintliga böcker...\n\nLokala: %d\nServern: %d\n\nTryck för att avbryta",
+            "Matchar befintliga böcker...\n\nLokala: %d\nServern: %d",
             #local_books,
             #remote_books
         ))
 
-        local count, refresh_err, skipped = self:refreshExistingMetadata(local_books, remote_books)
-        if refresh_err then
-            return false, refresh_err
-        end
+        local matched, skipped, manifest = self:buildMetadataRefreshQueue(local_books, remote_books)
 
         return true, {
-            refreshed = count,
+            matched = matched,
+            manifest = manifest,
             skipped = skipped or 0,
             local_count = #local_books,
             remote_count = #remote_books,
@@ -1565,6 +1669,7 @@ function GrimmorySync:performMetadataRefresh()
     self:closeProgressDialog()
 
     if not ok then
+        self:closeProgressDialog()
         UIManager:show(InfoMessage:new{
             text = _("Metadata refresh error: ") .. tostring(success),
             timeout = 5,
@@ -1574,29 +1679,69 @@ function GrimmorySync:performMetadataRefresh()
     end
 
     if not success then
-        if count_or_err ~= "Avbruten" then
+        self:closeProgressDialog()
+        if payload ~= "Avbruten" then
             UIManager:show(InfoMessage:new{
-                text = _("Error: ") .. tostring(count_or_err),
+                text = _("Error: ") .. tostring(payload),
                 timeout = 5,
             })
-            logger.err("[GrimmorySync] Metadata refresh error:", count_or_err)
+            logger.err("[GrimmorySync] Metadata refresh error:", payload)
         end
         return
     end
 
-    local stats = count_or_err
-    local message = string.format(
-        "✓ Metadata uppdaterad!\n\nLokala: %d böcker\nServern: %d böcker\nUppdaterade: %d böcker\nHoppade över: %d böcker",
-        stats.local_count or 0,
-        stats.remote_count or 0,
-        stats.refreshed or 0,
-        stats.skipped or 0
-    )
+    local stats = payload
+    local matched = stats.matched or {}
+    if #matched == 0 then
+        self:closeProgressDialog()
+        UIManager:show(InfoMessage:new{
+            text = string.format(
+                "✓ Metadata redan aktuell!\n\nLokala: %d böcker\nServern: %d böcker\nHoppade över: %d böcker",
+                stats.local_count or 0,
+                stats.remote_count or 0,
+                stats.skipped or 0
+            ),
+            timeout = 5,
+        })
+        return
+    end
 
-    UIManager:show(InfoMessage:new{
-        text = message,
-        timeout = 5,
-    })
+    self:refreshExistingMetadataAsync(matched, stats.skipped or 0, stats.manifest, function(done_ok, result)
+        self:closeProgressDialog()
+        result = result or {}
+        if not done_ok then
+            if result.error == "Avbruten" then
+                UIManager:show(InfoMessage:new{
+                    text = string.format(
+                        "Metadatauppdatering avbruten.\n\nUppdaterade: %d böcker\nKvar: %d böcker",
+                        result.refreshed or 0,
+                        result.remaining or 0
+                    ),
+                    timeout = 5,
+                })
+            else
+                UIManager:show(InfoMessage:new{
+                    text = _("Error: ") .. tostring(result.error or "unknown"),
+                    timeout = 5,
+                })
+                logger.err("[GrimmorySync] Metadata refresh error:", result.error)
+            end
+            return
+        end
+
+        local message = string.format(
+            "✓ Metadata uppdaterad!\n\nLokala: %d böcker\nServern: %d böcker\nUppdaterade: %d böcker\nHoppade över: %d böcker",
+            stats.local_count or 0,
+            stats.remote_count or 0,
+            result.refreshed or 0,
+            result.skipped or 0
+        )
+
+        UIManager:show(InfoMessage:new{
+            text = message,
+            timeout = 5,
+        })
+    end)
 end
 
 function GrimmorySync:showStatus()
