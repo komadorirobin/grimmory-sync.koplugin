@@ -18,6 +18,7 @@ local SETTINGS_FILE = "/storage/emulated/0/koreader/grimmory_sync_settings.txt"
 local LEGACY_SETTINGS_FILE = "/storage/emulated/0/koreader/booklore_sync_settings.txt"
 local HISTORY_FILE = "/storage/emulated/0/koreader/grimmory_sync_history.lua"
 local LEGACY_HISTORY_FILE = "/storage/emulated/0/koreader/booklore_sync_history.lua"
+local MANIFEST_FILE = "/storage/emulated/0/koreader/grimmory_sync_manifest.lua"
 local MAX_HISTORY = 15
 
 function GrimmorySync:loadSettings()
@@ -84,6 +85,35 @@ function GrimmorySync:saveHistory(history)
     end
     file:write("return " .. dump(history) .. "\n")
     file:close()
+end
+
+function GrimmorySync:loadManifest()
+    local ok, manifest = pcall(dofile, MANIFEST_FILE)
+    if ok and type(manifest) == "table" then
+        manifest.books = type(manifest.books) == "table" and manifest.books or {}
+        return manifest
+    end
+
+    return {
+        version = 1,
+        books = {},
+    }
+end
+
+function GrimmorySync:saveManifest(manifest)
+    local file = io.open(MANIFEST_FILE, "w")
+    if not file then
+        logger.warn("[GrimmorySync] Cannot save manifest")
+        return false
+    end
+
+    manifest.version = manifest.version or 1
+    manifest.saved_at = os.time()
+    manifest.books = type(manifest.books) == "table" and manifest.books or {}
+
+    file:write("return " .. dump(manifest) .. "\n")
+    file:close()
+    return true
 end
 
 function GrimmorySync:recordDownload(book, file_path)
@@ -553,6 +583,23 @@ function GrimmorySync:fetchBooklistFromGrimmory()
                 author = author:gsub("&lt;", "<")
                 author = author:gsub("&gt;", ">")
             end
+
+            local description = entry:match("<summary[^>]*>(.-)</summary>")
+                or entry:match("<content[^>]*>(.-)</content>")
+            if description then
+                description = description:gsub("<!%[CDATA%[(.-)%]%]>", "%1")
+                description = description:gsub("<[^>]+>", "")
+                description = description:gsub("&amp;", "&")
+                description = description:gsub("&apos;", "'")
+                description = description:gsub("&#39;", "'")
+                description = description:gsub("&quot;", '"')
+                description = description:gsub("&lt;", "<")
+                description = description:gsub("&gt;", ">")
+                description = description:gsub("%s+", " ")
+                description = description:gsub("^%s+", ""):gsub("%s+$", "")
+                if description == "" then description = nil end
+            end
+
             local download_link
             
             -- Extract genres/tags (category elements)
@@ -585,11 +632,15 @@ function GrimmorySync:fetchBooklistFromGrimmory()
                 series = series:gsub("&gt;", ">")
             end
             
-            -- Extract published year
-            local published = entry:match("<published>(.-)</published>") or entry:match("<updated>(.-)</updated>")
+            -- Extract updated/published timestamp. Grimmory metadata rewrites
+            -- should change one of these; the full value is kept for refresh
+            -- decisions while the year is still used for folder naming.
+            local updated = entry:match("<updated>(.-)</updated>")
+            local published = entry:match("<published>(.-)</published>")
+            local metadata_timestamp = updated or published
             local year
-            if published then
-                year = published:match("(%d%d%d%d)")
+            if metadata_timestamp then
+                year = metadata_timestamp:match("(%d%d%d%d)")
             end
             
             -- Look for acquisition links (actual book downloads)
@@ -631,6 +682,9 @@ function GrimmorySync:fetchBooklistFromGrimmory()
                     series = series,
                     series_index = series_index,
                     year = year,
+                    updated = updated,
+                    published = published,
+                    description = description,
                     genres = genres,
                     download_url = download_link,
                 })
@@ -951,8 +1005,53 @@ function GrimmorySync:findLocalMatch(remote, local_index)
     return nil, nil, false
 end
 
+function GrimmorySync:manifestKeyForPath(path)
+    return path or ""
+end
+
+function GrimmorySync:remoteMetadataSignature(remote)
+    local genres = {}
+    for _, genre in ipairs(remote.genres or {}) do
+        genres[#genres + 1] = tostring(genre)
+    end
+    table.sort(genres)
+
+    return table.concat({
+        remote.updated or "",
+        remote.published or "",
+        remote.download_url or "",
+        remote.title or "",
+        remote.author or "",
+        remote.series or "",
+        remote.series_index or "",
+        remote.year or "",
+        remote.description or "",
+        table.concat(genres, "|"),
+    }, "\31")
+end
+
+function GrimmorySync:getManifestEntry(manifest, path)
+    local key = self:manifestKeyForPath(path)
+    return manifest.books[key], key
+end
+
+function GrimmorySync:storeManifestEntry(manifest, path, remote)
+    local key = self:manifestKeyForPath(path)
+    manifest.books[key] = {
+        signature = self:remoteMetadataSignature(remote),
+        updated = remote.updated,
+        published = remote.published,
+        download_url = remote.download_url,
+        title = remote.title,
+        author = remote.author,
+        refreshed_at = os.time(),
+    }
+end
+
 function GrimmorySync:compareAndDownload(local_books, remote_books)
     local local_index = self:buildLocalBookIndex(local_books)
+    local manifest = self:loadManifest()
+    local manifest_changed = false
 
     local missing = {}
     for _, remote in ipairs(remote_books) do
@@ -988,9 +1087,18 @@ function GrimmorySync:compareAndDownload(local_books, remote_books)
             book.title
         ))
         
-        if self:downloadBook(book) then
+        local downloaded, path = self:downloadBook(book)
+        if downloaded then
             count = count + 1
+            if path then
+                self:storeManifestEntry(manifest, path, book)
+                manifest_changed = true
+            end
         end
+    end
+
+    if manifest_changed then
+        self:saveManifest(manifest)
     end
     
     return count, nil
@@ -998,47 +1106,60 @@ end
 
 function GrimmorySync:refreshExistingMetadata(local_books, remote_books)
     local local_index = self:buildLocalBookIndex(local_books)
+    local manifest = self:loadManifest()
     local matched = {}
+    local skipped = 0
 
     for _, remote in ipairs(remote_books) do
         local matched_book, matched_name, fuzzy = self:findLocalMatch(remote, local_index)
         if matched_book and matched_book.path then
-            if fuzzy then
-                logger.info("[GrimmorySync] Will refresh:", remote.title, "(fuzzy matched:", matched_name, ")")
+            local manifest_entry = self:getManifestEntry(manifest, matched_book.path)
+            local remote_signature = self:remoteMetadataSignature(remote)
+            if manifest_entry and manifest_entry.signature == remote_signature then
+                skipped = skipped + 1
+                logger.info("[GrimmorySync] Metadata unchanged, skipping:", remote.title)
             else
-                logger.info("[GrimmorySync] Will refresh:", remote.title, "(matched:", matched_name, ")")
+                if fuzzy then
+                    logger.info("[GrimmorySync] Will refresh:", remote.title, "(fuzzy matched:", matched_name, ")")
+                else
+                    logger.info("[GrimmorySync] Will refresh:", remote.title, "(matched:", matched_name, ")")
+                end
+                table.insert(matched, {
+                    remote = remote,
+                    local_path = matched_book.path,
+                })
             end
-            table.insert(matched, {
-                remote = remote,
-                local_path = matched_book.path,
-            })
         end
     end
 
     if #matched == 0 then
-        return 0, nil
+        return 0, nil, skipped
     end
 
     local count = 0
     for i, item in ipairs(matched) do
         if self.abort_sync then
             logger.info("[GrimmorySync] Metadata refresh aborted by user")
-            return count, nil
+            self:saveManifest(manifest)
+            return count, nil, skipped
         end
 
         self:showProgressDialog(string.format(
-            "Uppdaterar metadata %d av %d...\n\n%s\n\nTryck för att avbryta",
+            "Uppdaterar metadata %d av %d...\n\n%s\n\nHoppade över oförändrade: %d\n\nTryck för att avbryta",
             i,
             #matched,
-            item.remote.title
+            item.remote.title,
+            skipped
         ))
 
         if self:downloadBook(item.remote, item.local_path, { record_history = false }) then
             count = count + 1
+            self:storeManifestEntry(manifest, item.local_path, item.remote)
         end
     end
 
-    return count, nil
+    self:saveManifest(manifest)
+    return count, nil, skipped
 end
 
 function GrimmorySync:buildCalibrePath(book)
@@ -1219,7 +1340,7 @@ function GrimmorySync:downloadBook(book, target_path, options)
     if options.record_history ~= false then
         self:recordDownload(book, full_path)
     end
-    return true
+    return true, full_path
 end
 
 function GrimmorySync:showProgressDialog(text)
@@ -1428,12 +1549,17 @@ function GrimmorySync:performMetadataRefresh()
             #remote_books
         ))
 
-        local count, refresh_err = self:refreshExistingMetadata(local_books, remote_books)
+        local count, refresh_err, skipped = self:refreshExistingMetadata(local_books, remote_books)
         if refresh_err then
             return false, refresh_err
         end
 
-        return true, { refreshed = count, local_count = #local_books, remote_count = #remote_books }
+        return true, {
+            refreshed = count,
+            skipped = skipped or 0,
+            local_count = #local_books,
+            remote_count = #remote_books,
+        }
     end)
 
     self:closeProgressDialog()
@@ -1460,10 +1586,11 @@ function GrimmorySync:performMetadataRefresh()
 
     local stats = count_or_err
     local message = string.format(
-        "✓ Metadata uppdaterad!\n\nLokala: %d böcker\nServern: %d böcker\nUppdaterade: %d böcker",
+        "✓ Metadata uppdaterad!\n\nLokala: %d böcker\nServern: %d böcker\nUppdaterade: %d böcker\nHoppade över: %d böcker",
         stats.local_count or 0,
         stats.remote_count or 0,
-        stats.refreshed or 0
+        stats.refreshed or 0,
+        stats.skipped or 0
     )
 
     UIManager:show(InfoMessage:new{

@@ -8,7 +8,7 @@ A KOReader plugin that syncs books from a Grimmory OPDS server to a local device
 - OPDS catalogue pagination support.
 - Basic-auth support for protected Grimmory instances.
 - Automatic downloads for missing books.
-- Manual metadata refresh for existing local books by safely re-downloading matched EPUB files.
+- Manifest-based metadata refresh for existing local books by safely re-downloading only changed or previously untracked EPUB files.
 - Manual OTA update checks and installation from GitHub Releases.
 - Folder placement based on Grimmory genres/tags, including Manga, Serier, Light novels, Fiktion, Facklitteratur, and Lyrik.
 - Recent-download history with quick open from KOReader.
@@ -68,7 +68,7 @@ To refresh descriptions and other metadata that Grimmory has written into existi
 Menu -> Tools -> Grimmory Sync -> Refresh existing metadata
 ```
 
-This replaces matched local EPUB files with freshly downloaded copies from Grimmory. The replacement is conservative: the plugin downloads to a temporary file, verifies that it is not empty, backs up the existing file, and only then moves the new file into place.
+This replaces matched local EPUB files with freshly downloaded copies from Grimmory when their remote metadata signature has changed. The first run creates `grimmory_sync_manifest.lua` and may refresh all matched books once; later runs skip unchanged books. The replacement is conservative: the plugin downloads to a temporary file, verifies that it is not empty, backs up the existing file, and only then moves the new file into place.
 
 To update the plugin directly from KOReader, run:
 
@@ -90,7 +90,7 @@ Books are placed into subfolders according to tags/genres returned by the OPDS f
 
 - The current download implementation prefers EPUB acquisition links.
 - Local matching is filename-based and intentionally fuzzy around common punctuation and accents.
-- Metadata refresh currently refreshes all matched local books. It does not yet compare per-book metadata hashes or `updated` timestamps.
+- Metadata refresh uses `grimmory_sync_manifest.lua` and compares OPDS metadata markers such as `updated`, `published`, download URL, title, author, series, tags, and description.
 - OTA updates require a release asset named `grimmory-sync.koplugin.zip`.
 - The folder placement rules are tailored for a Swedish personal library layout. Adjust `generateTargetPath()` if your taxonomy differs.
 - KOReader must have network access to the Grimmory server.

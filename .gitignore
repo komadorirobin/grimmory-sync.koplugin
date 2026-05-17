@@ -7,5 +7,6 @@ mainbackup.lua
 test-*.lua
 grimmory_sync_settings.txt
 grimmory_sync_history.lua
+grimmory_sync_manifest.lua
 booklore_sync_settings.txt
 booklore_sync_history.lua
