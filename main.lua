@@ -1519,19 +1519,27 @@ function GrimmorySync:closeProgressDialog()
     if self.progress_dialog then
         local dialog = self.progress_dialog
         self.progress_dialog = nil
-        UIManager:close(dialog)
+        pcall(function() UIManager:close(dialog) end)
+        if UIManager.forceRePaint then
+            UIManager:forceRePaint()
+        end
     end
 end
 
 function GrimmorySync:startSync()
     if self.server_url == "" then
-        UIManager:show(ConfirmBox:new{
+        local config_dialog
+        config_dialog = ConfirmBox:new{
             text = _("Server not configured!\n\nConfigure now?"),
             ok_text = _("Configure"),
             ok_callback = function()
-                self:showServerConfig()
+                pcall(function() UIManager:close(config_dialog) end)
+                UIManager:scheduleIn(0, function()
+                    self:showServerConfig()
+                end)
             end,
-        })
+        }
+        UIManager:show(config_dialog)
         return
     end
     
@@ -1540,39 +1548,54 @@ function GrimmorySync:startSync()
     self.abort_notified = false
     
     -- Show confirmation with cancel option
-    UIManager:show(ConfirmBox:new{
+    local confirm_dialog
+    confirm_dialog = ConfirmBox:new{
         text = _("Synka saknade böcker?\n\nEndast böcker som saknas på enheten laddas ner. Du kan avbryta när som helst."),
         ok_text = _("Starta"),
         cancel_text = _("Avbryt"),
         ok_callback = function()
-            self:performSync()
+            pcall(function() UIManager:close(confirm_dialog) end)
+            UIManager:scheduleIn(0, function()
+                self:performSync()
+            end)
         end,
-    })
+    }
+    UIManager:show(confirm_dialog)
 end
 
 function GrimmorySync:startMetadataRefresh()
     if self.server_url == "" then
-        UIManager:show(ConfirmBox:new{
+        local config_dialog
+        config_dialog = ConfirmBox:new{
             text = _("Server not configured!\n\nConfigure now?"),
             ok_text = _("Configure"),
             ok_callback = function()
-                self:showServerConfig()
+                pcall(function() UIManager:close(config_dialog) end)
+                UIManager:scheduleIn(0, function()
+                    self:showServerConfig()
+                end)
             end,
-        })
+        }
+        UIManager:show(config_dialog)
         return
     end
 
     self.abort_sync = false
     self.abort_notified = false
 
-    UIManager:show(ConfirmBox:new{
+    local confirm_dialog
+    confirm_dialog = ConfirmBox:new{
         text = _("Uppdatera metadata i befintliga böcker?\n\nPluginet laddar om matchade EPUB-filer från Grimmory och ersätter lokala filer först efter att nedladdningen har verifierats. Saknade böcker laddas inte ner här."),
         ok_text = _("Uppdatera"),
         cancel_text = _("Avbryt"),
         ok_callback = function()
-            self:performMetadataRefresh()
+            pcall(function() UIManager:close(confirm_dialog) end)
+            UIManager:scheduleIn(0, function()
+                self:performMetadataRefresh()
+            end)
         end,
-    })
+    }
+    UIManager:show(confirm_dialog)
 end
 
 function GrimmorySync:performSync()
