@@ -65,6 +65,34 @@ local function urlEncode(value)
     end)
 end
 
+local function decodeJsonString(value)
+    if not value then return nil end
+    value = value:gsub("\\u(%x%x%x%x)", function(hex)
+        local code = tonumber(hex, 16)
+        if not code then return "" end
+        if code < 0x80 then
+            return string.char(code)
+        elseif code < 0x800 then
+            return string.char(
+                0xC0 + math.floor(code / 0x40),
+                0x80 + (code % 0x40)
+            )
+        end
+        return string.char(
+            0xE0 + math.floor(code / 0x1000),
+            0x80 + (math.floor(code / 0x40) % 0x40),
+            0x80 + (code % 0x40)
+        )
+    end)
+    value = value:gsub("\\n", "\n")
+        :gsub("\\r", "")
+        :gsub("\\t", "\t")
+        :gsub('\\"', '"')
+        :gsub("\\/", "/")
+        :gsub("\\\\", "\\")
+    return value
+end
+
 local function jsonDecode(body)
     local ok_json, json = pcall(require, "json")
     if not ok_json or not json or type(json.decode) ~= "function" then
@@ -76,6 +104,51 @@ local function jsonDecode(body)
         return nil, "Could not parse JSON response"
     end
     return data, nil
+end
+
+local function jsonFieldString(object, field)
+    local value = object:match('"' .. field .. '"%s*:%s*"(.-)"')
+    return value and decodeJsonString(value) or nil
+end
+
+local function jsonFieldNumber(object, field)
+    return object:match('"' .. field .. '"%s*:%s*(%-?%d+)')
+end
+
+local function jsonFieldBool(object, field)
+    local value = object:match('"' .. field .. '"%s*:%s*(true)')
+        or object:match('"' .. field .. '"%s*:%s*(false)')
+    if value == "true" then return true end
+    if value == "false" then return false end
+    return nil
+end
+
+local function parseAuthorsFallback(body)
+    local authors = {}
+    if type(body) ~= "string" then return authors end
+
+    for object in body:gmatch("{(.-)}") do
+        local id = jsonFieldNumber(object, "id") or jsonFieldString(object, "id")
+        local name = jsonFieldString(object, "name")
+            or jsonFieldString(object, "authorName")
+            or jsonFieldString(object, "fullName")
+            or jsonFieldString(object, "displayName")
+
+        if id and name and name ~= "" then
+            authors[#authors + 1] = {
+                id = id,
+                name = name,
+                hasPhoto = jsonFieldBool(object, "hasPhoto")
+                    or jsonFieldBool(object, "has_photo")
+                    or jsonFieldBool(object, "photo"),
+                photoUrl = jsonFieldString(object, "photoUrl"),
+                thumbnailUrl = jsonFieldString(object, "thumbnailUrl"),
+                imageUrl = jsonFieldString(object, "imageUrl"),
+            }
+        end
+    end
+
+    return authors
 end
 
 function GrimmorySync:loadSettings()
@@ -1347,6 +1420,17 @@ function GrimmorySync:removeAuthorImageVariants(image_dir, stem, keep_ext)
     end
 end
 
+function GrimmorySync:apiAuthHeaders(token)
+    local headers = {}
+    if type(token) == "string" and token ~= "" then
+        headers["authorization"] = "Bearer " .. token
+    elseif self.username ~= "" and self.password ~= "" then
+        local mime = require("mime")
+        headers["authorization"] = "Basic " .. mime.b64(self.username .. ":" .. self.password)
+    end
+    return headers
+end
+
 function GrimmorySync:loginToGrimmoryApi()
     if self.username == "" or self.password == "" then
         return nil, "Author image sync requires Grimmory username and password."
@@ -1403,11 +1487,12 @@ function GrimmorySync:extractAuthorsArray(data)
 end
 
 function GrimmorySync:fetchAuthorsFromGrimmory(token)
+    logger.info("[GrimmorySync] Fetching authors for Bookshelf images")
+    local headers = self:apiAuthHeaders(token)
+    headers["accept"] = "application/json"
+
     local response, err = self:httpRequest(self:buildServerUrl("/api/v1/authors"), {
-        headers = {
-            ["accept"] = "application/json",
-            ["authorization"] = "Bearer " .. token,
-        },
+        headers = headers,
     })
     if err then
         return nil, err
@@ -1415,14 +1500,25 @@ function GrimmorySync:fetchAuthorsFromGrimmory(token)
 
     local data, decode_err = jsonDecode(response)
     if not data then
+        local fallback_authors = parseAuthorsFallback(response)
+        if #fallback_authors > 0 then
+            logger.info("[GrimmorySync] Parsed authors with fallback JSON parser:", #fallback_authors)
+            return fallback_authors, nil
+        end
         return nil, decode_err
     end
 
     local authors = self:extractAuthorsArray(data)
     if not authors then
+        local fallback_authors = parseAuthorsFallback(response)
+        if #fallback_authors > 0 then
+            logger.info("[GrimmorySync] Parsed authors from unknown response shape:", #fallback_authors)
+            return fallback_authors, nil
+        end
         return nil, "Could not find authors array in Grimmory response."
     end
 
+    logger.info("[GrimmorySync] Authors returned by Grimmory:", #authors)
     return authors, nil
 end
 
@@ -1432,6 +1528,9 @@ function GrimmorySync:authorHasPhoto(author)
     if value == nil then value = author.has_photo end
     if value == nil then value = author.photo end
     return value == true or value == "true" or value == 1 or value == "1"
+        or type(author.photoUrl) == "string"
+        or type(author.thumbnailUrl) == "string"
+        or type(author.imageUrl) == "string"
 end
 
 function GrimmorySync:authorDisplayName(author)
@@ -1468,10 +1567,13 @@ function GrimmorySync:downloadAuthorImage(author, token)
         return false, "Could not create temporary author image file."
     end
 
+    local image_url = "/api/v1/media/author/" .. tostring(id) .. "/photo"
+    if type(token) == "string" and token ~= "" then
+        image_url = image_url .. "?token=" .. urlEncode(token)
+    end
+
     local response, err, status_code, response_headers = self:httpRequest(
-        self:buildServerUrl(
-            "/api/v1/media/author/" .. tostring(id) .. "/photo?token=" .. urlEncode(token)
-        ),
+        self:buildServerUrl(image_url),
         {
             sink = function(chunk, sink_err)
                 if self.abort_sync then
@@ -1487,9 +1589,7 @@ function GrimmorySync:downloadAuthorImage(author, token)
                 end
                 return 1
             end,
-            headers = {
-                ["authorization"] = "Bearer " .. token,
-            },
+            headers = self:apiAuthHeaders(token),
         }
     )
     file:close()
@@ -1545,7 +1645,7 @@ function GrimmorySync:syncAuthorImagesAsync(done_callback)
         self:showProgressDialog("Loggar in för författarbilder...")
         local token, err = self:loginToGrimmoryApi()
         if not token then
-            return nil, err
+            logger.warn("[GrimmorySync] Token login for author images failed; trying Basic auth:", err)
         end
 
         if self.abort_sync then
@@ -1555,6 +1655,9 @@ function GrimmorySync:syncAuthorImagesAsync(done_callback)
         self:showProgressDialog("Hämtar författare från Grimmory...")
         local authors, authors_err = self:fetchAuthorsFromGrimmory(token)
         if not authors then
+            if err then
+                authors_err = tostring(authors_err) .. " (token login failed: " .. tostring(err) .. ")"
+            end
             return nil, authors_err
         end
 
@@ -1568,8 +1671,8 @@ function GrimmorySync:syncAuthorImagesAsync(done_callback)
 
     local token = token_or_err
     local authors = authors_or_err
-    if not token then
-        done_callback(false, { enabled = true, error = authors or "unknown error" })
+    if type(authors) ~= "table" then
+        done_callback(false, { enabled = true, error = authors or token or "unknown error" })
         return
     end
 
@@ -1597,6 +1700,7 @@ function GrimmorySync:syncAuthorImagesAsync(done_callback)
 
     local synced = 0
     local failed = 0
+    local last_error
     local i = 0
 
     local function step()
@@ -1608,6 +1712,7 @@ function GrimmorySync:syncAuthorImagesAsync(done_callback)
                 synced = synced,
                 skipped = skipped,
                 failed = failed,
+                last_error = last_error,
                 remaining = #queue - i,
                 path = self:authorImagesPath(),
             })
@@ -1622,6 +1727,7 @@ function GrimmorySync:syncAuthorImagesAsync(done_callback)
                 synced = synced,
                 skipped = skipped,
                 failed = failed,
+                last_error = last_error,
                 path = self:authorImagesPath(),
             })
             return
@@ -1644,6 +1750,7 @@ function GrimmorySync:syncAuthorImagesAsync(done_callback)
                 synced = synced + 1
             else
                 failed = failed + 1
+                last_error = image_err
                 logger.warn("[GrimmorySync] Author image sync failed:", image_err or "unknown")
             end
             UIManager:scheduleIn(PROGRESS_STEP_DELAY_S, step)
@@ -1680,6 +1787,9 @@ function GrimmorySync:metadataRefreshMessage(stats, result, image_ok, image_resu
                 image_result.skipped or 0,
                 image_result.failed or 0
             )
+            if (image_result.failed or 0) > 0 and image_result.last_error then
+                message = message .. "\nSenaste fel: " .. tostring(image_result.last_error)
+            end
         elseif image_result.error == "Avbruten" then
             message = message .. string.format(
                 "\n\nFörfattarbildsynk avbruten.\nUppdaterade: %d\nKvar: %d",
