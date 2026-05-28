@@ -102,7 +102,7 @@ Books are placed into subfolders according to tags/genres returned by the OPDS f
 
 - The current download implementation prefers EPUB acquisition links.
 - Local matching is filename-based and intentionally fuzzy around common punctuation and accents.
-- Metadata refresh uses `grimmory_sync_manifest.lua` and compares OPDS metadata markers such as `updated`, `published`, download URL, title, author, series, tags, and description.
+- Metadata refresh uses `grimmory_sync_manifest.lua` and compares stable metadata such as title, author, series, tags, description, and Hardcover IDs when available from Grimmory's authenticated book API.
 - Author image sync uses Grimmory's authenticated `/api/v1/authors` and `/api/v1/media/author/{id}/photo` endpoints, and writes exact/slugged Bookshelf-compatible filenames.
 - OTA updates require a release asset named `grimmory-sync.koplugin.zip`.
 - The folder placement rules are tailored for a Swedish personal library layout. Adjust `generateTargetPath()` if your taxonomy differs.

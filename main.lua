@@ -152,6 +152,39 @@ local function parseAuthorsFallback(body)
     return authors
 end
 
+local function parseBookMetadataFallback(body)
+    local books = {}
+    if type(body) ~= "string" then return books end
+
+    local function findNextBookStart(start_pos)
+        return body:find("{%s*\"id\"%s*:", start_pos)
+    end
+
+    local object_start = findNextBookStart(1)
+    while object_start do
+        local next_start = findNextBookStart(object_start + 1)
+        local object = body:sub(object_start, (next_start or (#body + 1)) - 1)
+        local id = jsonFieldNumber(object, "id") or jsonFieldString(object, "id")
+        local hardcover_id = jsonFieldString(object, "hardcoverId")
+        local hardcover_book_id = jsonFieldString(object, "hardcoverBookId")
+            or jsonFieldNumber(object, "hardcoverBookId")
+
+        if id and (hardcover_id or hardcover_book_id) then
+            books[#books + 1] = {
+                id = id,
+                metadata = {
+                    hardcoverId = hardcover_id,
+                    hardcoverBookId = hardcover_book_id,
+                },
+            }
+        end
+
+        object_start = next_start
+    end
+
+    return books
+end
+
 function GrimmorySync:loadSettings()
     local file = io.open(SETTINGS_FILE, "r") or io.open(LEGACY_SETTINGS_FILE, "r")
     if not file then
@@ -934,8 +967,12 @@ function GrimmorySync:fetchBooklistFromGrimmory()
             end
             
             if title and download_link then
+                local book_id = entry:match("<id>urn:booklore:book:(%d+)</id>")
+                    or download_link:match("/opds/(%d+)/download")
+                    or download_link:match("[?&]fileId=(%d+)")
                 logger.info("[GrimmorySync] Found book:", title, "by", author or "Unknown", "series:", series or "none", "->", download_link)
                 table.insert(books, {
+                    book_id = book_id,
                     title = title,
                     author = author,
                     series = series,
@@ -1268,7 +1305,7 @@ function GrimmorySync:manifestKeyForPath(path)
     return path or ""
 end
 
-function GrimmorySync:metadataSignatureParts(remote, include_year)
+function GrimmorySync:metadataSignatureParts(remote)
     local genres = {}
     for _, genre in ipairs(remote.genres or {}) do
         genres[#genres + 1] = tostring(genre)
@@ -1282,10 +1319,8 @@ function GrimmorySync:metadataSignatureParts(remote, include_year)
         remote.series_index or "",
     }
 
-    if include_year then
-        parts[#parts + 1] = remote.year or ""
-    end
-
+    parts[#parts + 1] = remote.hardcover_id or ""
+    parts[#parts + 1] = remote.hardcover_book_id or ""
     parts[#parts + 1] = remote.description or ""
     parts[#parts + 1] = table.concat(genres, "|")
 
@@ -1293,19 +1328,7 @@ function GrimmorySync:metadataSignatureParts(remote, include_year)
 end
 
 function GrimmorySync:remoteMetadataSignature(remote)
-    return table.concat(self:metadataSignatureParts(remote, false), SIGNATURE_SEPARATOR)
-end
-
-function GrimmorySync:remoteLegacyMetadataSignature(remote)
-    local parts = {
-        remote.updated or "",
-        remote.published or "",
-        remote.download_url or "",
-    }
-    for _, value in ipairs(self:metadataSignatureParts(remote, true)) do
-        parts[#parts + 1] = value
-    end
-    return table.concat(parts, SIGNATURE_SEPARATOR)
+    return table.concat(self:metadataSignatureParts(remote), SIGNATURE_SEPARATOR)
 end
 
 function GrimmorySync:splitMetadataSignature(signature)
@@ -1339,8 +1362,28 @@ function GrimmorySync:stableSignatureFromLegacy(signature)
         parts[5] or "",
         parts[6] or "",
         parts[7] or "",
+        "",
+        "",
         parts[9] or "",
         parts[10] or "",
+    }, SIGNATURE_SEPARATOR)
+end
+
+function GrimmorySync:stableSignatureFromPreviousStable(signature)
+    local parts = self:splitMetadataSignature(signature)
+    if #parts ~= 6 then
+        return nil
+    end
+
+    return table.concat({
+        parts[1] or "",
+        parts[2] or "",
+        parts[3] or "",
+        parts[4] or "",
+        "",
+        "",
+        parts[5] or "",
+        parts[6] or "",
     }, SIGNATURE_SEPARATOR)
 end
 
@@ -1354,11 +1397,11 @@ function GrimmorySync:metadataSignatureMatches(manifest_entry, remote)
         return true, false
     end
 
-    if manifest_entry.signature == self:remoteLegacyMetadataSignature(remote) then
+    if self:stableSignatureFromLegacy(manifest_entry.signature) == current_signature then
         return true, true
     end
 
-    if self:stableSignatureFromLegacy(manifest_entry.signature) == current_signature then
+    if self:stableSignatureFromPreviousStable(manifest_entry.signature) == current_signature then
         return true, true
     end
 
@@ -1373,6 +1416,8 @@ function GrimmorySync:migrateManifestSignature(manifest_entry, remote)
     manifest_entry.download_url = remote.download_url
     manifest_entry.title = remote.title
     manifest_entry.author = remote.author
+    manifest_entry.hardcover_id = remote.hardcover_id
+    manifest_entry.hardcover_book_id = remote.hardcover_book_id
     manifest_entry.signature_migrated_at = os.time()
 end
 
@@ -1390,6 +1435,8 @@ function GrimmorySync:storeManifestEntry(manifest, path, remote)
         download_url = remote.download_url,
         title = remote.title,
         author = remote.author,
+        hardcover_id = remote.hardcover_id,
+        hardcover_book_id = remote.hardcover_book_id,
         refreshed_at = os.time(),
     }
 end
@@ -1549,7 +1596,7 @@ end
 
 function GrimmorySync:loginToGrimmoryApi()
     if self.username == "" or self.password == "" then
-        return nil, "Author image sync requires Grimmory username and password."
+        return nil, "Grimmory API sync requires username and password."
     end
 
     local body = jsonObject({
@@ -1583,6 +1630,122 @@ function GrimmorySync:loginToGrimmoryApi()
     end
 
     return data.accessToken, nil
+end
+
+function GrimmorySync:extractBooksArray(data)
+    local function asArray(candidate)
+        if type(candidate) == "table" then
+            if candidate[1] ~= nil or next(candidate) == nil then
+                return candidate
+            end
+        end
+        return nil
+    end
+
+    return asArray(data and data.books)
+        or asArray(data and data.data)
+        or asArray(data and data.content)
+        or asArray(data and data.items)
+        or asArray(data)
+end
+
+function GrimmorySync:bookApiId(book)
+    if type(book) ~= "table" then
+        return nil
+    end
+
+    local metadata = type(book.metadata) == "table" and book.metadata or nil
+    return book.id or book.bookId or book.book_id or (metadata and (metadata.bookId or metadata.id))
+end
+
+function GrimmorySync:bookApiMetadata(book)
+    if type(book) ~= "table" then
+        return {}
+    end
+    return type(book.metadata) == "table" and book.metadata or book
+end
+
+function GrimmorySync:metadataFieldValue(value)
+    local value_type = type(value)
+    if value == nil then
+        return ""
+    elseif value_type == "string" then
+        return trim(value)
+    elseif value_type == "number" or value_type == "boolean" then
+        return tostring(value)
+    end
+    return ""
+end
+
+function GrimmorySync:fetchBookMetadataFromGrimmoryApi(token)
+    logger.info("[GrimmorySync] Fetching book metadata from Grimmory API")
+    local headers = self:apiAuthHeaders(token)
+    headers["accept"] = "application/json"
+
+    local response, err = self:httpRequest(self:buildServerUrl("/api/v1/books?stripForListView=false"), {
+        headers = headers,
+    })
+    if err then
+        return nil, err
+    end
+
+    local data, decode_err = jsonDecode(response)
+    if not data then
+        local fallback_books = parseBookMetadataFallback(response)
+        if #fallback_books > 0 then
+            logger.info("[GrimmorySync] Parsed book metadata with fallback JSON parser:", #fallback_books)
+            return fallback_books, nil
+        end
+        return nil, decode_err
+    end
+
+    local books = self:extractBooksArray(data)
+    if not books then
+        return nil, "Could not find books array in Grimmory API response."
+    end
+
+    return books, nil
+end
+
+function GrimmorySync:applyBookApiMetadata(remote_books, api_books)
+    local by_id = {}
+    for _, book in ipairs(api_books or {}) do
+        local id = self:bookApiId(book)
+        if id ~= nil then
+            by_id[tostring(id)] = book
+        end
+    end
+
+    local updated = 0
+    for _, remote in ipairs(remote_books or {}) do
+        local api_book = remote.book_id and by_id[tostring(remote.book_id)]
+        if api_book then
+            local metadata = self:bookApiMetadata(api_book)
+            remote.hardcover_id = self:metadataFieldValue(metadata.hardcoverId)
+            remote.hardcover_book_id = self:metadataFieldValue(metadata.hardcoverBookId)
+            updated = updated + 1
+        end
+    end
+
+    logger.info("[GrimmorySync] Enriched", updated, "books with Grimmory API metadata")
+    return updated
+end
+
+function GrimmorySync:enrichRemoteBooksWithBookApiMetadata(remote_books)
+    local token, login_err = self:loginToGrimmoryApi()
+    if not token then
+        logger.warn("[GrimmorySync] Book metadata API enrichment skipped:", login_err)
+        return false, login_err
+    end
+
+    local api_books, err = self:fetchBookMetadataFromGrimmoryApi(token)
+    if not api_books then
+        logger.warn("[GrimmorySync] Book metadata API enrichment failed:", err)
+        return false, err
+    end
+
+    local count = self:applyBookApiMetadata(remote_books, api_books)
+    return true, count
 end
 
 function GrimmorySync:extractAuthorsArray(data)
@@ -2493,6 +2656,18 @@ function GrimmorySync:performSync()
         end
         
         logger.info("[GrimmorySync] Remote books found:", #remote_books)
+
+        self:showProgressDialog("Hämtar extra metadata från Grimmory...")
+        local enriched, enrich_result = self:enrichRemoteBooksWithBookApiMetadata(remote_books)
+        if enriched then
+            logger.info("[GrimmorySync] Book API metadata applied:", enrich_result)
+        else
+            logger.warn("[GrimmorySync] Continuing without Book API metadata:", enrich_result)
+        end
+
+        if self.abort_sync then
+            return false, "Avbruten"
+        end
         
         self:showProgressDialog(string.format(
             "Jämför och laddar ner...\n\nLokala: %d\nServern: %d\n\nTryck Avbryt för att stoppa efter pågående fil.",
@@ -2567,6 +2742,18 @@ function GrimmorySync:performMetadataRefresh()
         end
 
         logger.info("[GrimmorySync] Remote books found:", #remote_books)
+
+        self:showProgressDialog("Hämtar extra metadata från Grimmory...")
+        local enriched, enrich_result = self:enrichRemoteBooksWithBookApiMetadata(remote_books)
+        if enriched then
+            logger.info("[GrimmorySync] Book API metadata applied:", enrich_result)
+        else
+            logger.warn("[GrimmorySync] Continuing without Book API metadata:", enrich_result)
+        end
+
+        if self.abort_sync then
+            return false, "Avbruten"
+        end
 
         self:showProgressDialog(string.format(
             "Matchar befintliga böcker...\n\nLokala: %d\nServern: %d",
