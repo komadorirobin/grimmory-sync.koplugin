@@ -23,6 +23,7 @@ local MANIFEST_FILE = "/storage/emulated/0/koreader/grimmory_sync_manifest.lua"
 local MAX_HISTORY = 15
 local PROGRESS_STEP_DELAY_S = 0.2
 local AUTHOR_IMAGE_EXTS = { "jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "tif" }
+local SIGNATURE_SEPARATOR = "\31"
 
 local function settingToBool(value, default)
     if value == nil or value == "" then
@@ -1267,25 +1268,112 @@ function GrimmorySync:manifestKeyForPath(path)
     return path or ""
 end
 
-function GrimmorySync:remoteMetadataSignature(remote)
+function GrimmorySync:metadataSignatureParts(remote, include_year)
     local genres = {}
     for _, genre in ipairs(remote.genres or {}) do
         genres[#genres + 1] = tostring(genre)
     end
     table.sort(genres)
 
-    return table.concat({
-        remote.updated or "",
-        remote.published or "",
-        remote.download_url or "",
+    local parts = {
         remote.title or "",
         remote.author or "",
         remote.series or "",
         remote.series_index or "",
-        remote.year or "",
-        remote.description or "",
-        table.concat(genres, "|"),
-    }, "\31")
+    }
+
+    if include_year then
+        parts[#parts + 1] = remote.year or ""
+    end
+
+    parts[#parts + 1] = remote.description or ""
+    parts[#parts + 1] = table.concat(genres, "|")
+
+    return parts
+end
+
+function GrimmorySync:remoteMetadataSignature(remote)
+    return table.concat(self:metadataSignatureParts(remote, false), SIGNATURE_SEPARATOR)
+end
+
+function GrimmorySync:remoteLegacyMetadataSignature(remote)
+    local parts = {
+        remote.updated or "",
+        remote.published or "",
+        remote.download_url or "",
+    }
+    for _, value in ipairs(self:metadataSignatureParts(remote, true)) do
+        parts[#parts + 1] = value
+    end
+    return table.concat(parts, SIGNATURE_SEPARATOR)
+end
+
+function GrimmorySync:splitMetadataSignature(signature)
+    local parts = {}
+    if type(signature) ~= "string" or signature == "" then
+        return parts
+    end
+
+    local start = 1
+    while true do
+        local sep_start, sep_end = signature:find(SIGNATURE_SEPARATOR, start, true)
+        if not sep_start then
+            parts[#parts + 1] = signature:sub(start)
+            break
+        end
+        parts[#parts + 1] = signature:sub(start, sep_start - 1)
+        start = sep_end + 1
+    end
+
+    return parts
+end
+
+function GrimmorySync:stableSignatureFromLegacy(signature)
+    local parts = self:splitMetadataSignature(signature)
+    if #parts < 10 then
+        return nil
+    end
+
+    return table.concat({
+        parts[4] or "",
+        parts[5] or "",
+        parts[6] or "",
+        parts[7] or "",
+        parts[9] or "",
+        parts[10] or "",
+    }, SIGNATURE_SEPARATOR)
+end
+
+function GrimmorySync:metadataSignatureMatches(manifest_entry, remote)
+    if not manifest_entry or type(manifest_entry.signature) ~= "string" then
+        return false, false
+    end
+
+    local current_signature = self:remoteMetadataSignature(remote)
+    if manifest_entry.signature == current_signature then
+        return true, false
+    end
+
+    if manifest_entry.signature == self:remoteLegacyMetadataSignature(remote) then
+        return true, true
+    end
+
+    if self:stableSignatureFromLegacy(manifest_entry.signature) == current_signature then
+        return true, true
+    end
+
+    return false, false
+end
+
+function GrimmorySync:migrateManifestSignature(manifest_entry, remote)
+    if not manifest_entry then return end
+    manifest_entry.signature = self:remoteMetadataSignature(remote)
+    manifest_entry.updated = remote.updated
+    manifest_entry.published = remote.published
+    manifest_entry.download_url = remote.download_url
+    manifest_entry.title = remote.title
+    manifest_entry.author = remote.author
+    manifest_entry.signature_migrated_at = os.time()
 end
 
 function GrimmorySync:getManifestEntry(manifest, path)
@@ -1909,14 +1997,20 @@ function GrimmorySync:buildMetadataRefreshQueue(local_books, remote_books)
     local manifest = self:loadManifest()
     local matched = {}
     local skipped = 0
+    local manifest_changed = false
 
     for _, remote in ipairs(remote_books) do
         local matched_book, matched_name, fuzzy = self:findLocalMatch(remote, local_index)
         if matched_book and matched_book.path then
             local manifest_entry = self:getManifestEntry(manifest, matched_book.path)
-            local remote_signature = self:remoteMetadataSignature(remote)
-            if manifest_entry and manifest_entry.signature == remote_signature then
+            local signature_matches, should_migrate = self:metadataSignatureMatches(manifest_entry, remote)
+            if signature_matches then
                 skipped = skipped + 1
+                if should_migrate then
+                    self:migrateManifestSignature(manifest_entry, remote)
+                    manifest_changed = true
+                    logger.info("[GrimmorySync] Migrated stable metadata signature:", remote.title)
+                end
                 logger.info("[GrimmorySync] Metadata unchanged, skipping:", remote.title)
             else
                 if fuzzy then
@@ -1930,6 +2024,10 @@ function GrimmorySync:buildMetadataRefreshQueue(local_books, remote_books)
                 })
             end
         end
+    end
+
+    if manifest_changed then
+        self:saveManifest(manifest)
     end
 
     return matched, skipped, manifest
