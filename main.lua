@@ -30,13 +30,14 @@ local ROUTING_PROFILE_FLAT = "flat"
 local ROUTING_PROFILE_AUTHOR = "author"
 local ROUTING_PROFILE_GENRE_SERIES = "genre_series"
 local ROUTING_PROFILE_CUSTOM = "custom"
-local ROUTING_PROFILE_ROBIN_LEGACY = "robin_legacy"
+local ROUTING_PROFILE_SWEDISH_EXAMPLE = "swedish_genre_example"
+local LEGACY_ROUTING_PROFILE_SWEDISH_EXAMPLE = "robin_legacy"
 local ROUTING_PROFILE_LIST = {
     { id = ROUTING_PROFILE_FLAT, label = "Library root" },
     { id = ROUTING_PROFILE_AUTHOR, label = "Author folders" },
     { id = ROUTING_PROFILE_GENRE_SERIES, label = "Genre/series folders" },
     { id = ROUTING_PROFILE_CUSTOM, label = "Custom rules file" },
-    { id = ROUTING_PROFILE_ROBIN_LEGACY, label = "Robin legacy folders" },
+    { id = ROUTING_PROFILE_SWEDISH_EXAMPLE, label = "Swedish genre example" },
 }
 
 local function settingToBool(value, default)
@@ -233,7 +234,9 @@ function GrimmorySync:loadSettings()
 
     local routing_profile = settings.routing_profile
     if routing_profile == nil or routing_profile == "" then
-        routing_profile = ROUTING_PROFILE_ROBIN_LEGACY
+        routing_profile = ROUTING_PROFILE_SWEDISH_EXAMPLE
+    elseif routing_profile == LEGACY_ROUTING_PROFILE_SWEDISH_EXAMPLE then
+        routing_profile = ROUTING_PROFILE_SWEDISH_EXAMPLE
     elseif not isRoutingProfile(routing_profile) then
         routing_profile = ROUTING_PROFILE_FLAT
     end
@@ -1315,7 +1318,7 @@ function GrimmorySync:genreSeriesTargetPath(book)
     return genre
 end
 
-function GrimmorySync:robinLegacyTargetPath(book)
+function GrimmorySync:swedishGenreExampleTargetPath(book)
     local author_sort = self:authorSortName(book)
     local series = self:seriesPathName(book)
 
@@ -1463,8 +1466,8 @@ function GrimmorySync:generateTargetPath(book)
     local profile = self.routing_profile or ROUTING_PROFILE_FLAT
     local target_subdir
 
-    if profile == ROUTING_PROFILE_ROBIN_LEGACY then
-        target_subdir = self:robinLegacyTargetPath(book)
+    if profile == ROUTING_PROFILE_SWEDISH_EXAMPLE then
+        target_subdir = self:swedishGenreExampleTargetPath(book)
     elseif profile == ROUTING_PROFILE_AUTHOR then
         target_subdir = self:authorTargetPath(book)
     elseif profile == ROUTING_PROFILE_GENRE_SERIES then

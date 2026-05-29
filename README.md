@@ -55,9 +55,9 @@ The menu item `Download folder profile` controls where newly downloaded books ar
 - `Author folders`: put books under an author-sort folder.
 - `Genre/series folders`: put books under the first Grimmory genre/tag, then under the series when present.
 - `Custom rules file`: read rules from `/storage/emulated/0/koreader/grimmory_sync_path_rules.lua`, or another path configured from the same menu.
-- `Robin legacy folders`: the old Swedish personal layout for Manga, Serier, Light novels, Fiktion, Facklitteratur, and Lyrik.
+- `Swedish genre example`: an example layout for Swedish tags such as Manga, Serier, Light novels, Fiktion, Facklitteratur, and Lyrik.
 
-New installations default to `Library root`. Existing installations without a saved folder profile are treated as `Robin legacy folders` to avoid moving an established personal library layout.
+New installations default to `Library root`. Existing installations without a saved folder profile are treated as `Swedish genre example` to avoid moving an established personal library layout. Older saved personal-layout settings are migrated automatically.
 
 Custom rules may return either a Lua table or a function. A table-based example is included in `examples/path_rules.lua`.
 
