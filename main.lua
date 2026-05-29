@@ -217,7 +217,7 @@ function GrimmorySync:loadSettings()
             username = "",
             password = "",
             local_path = DEFAULT_LOCAL_PATH,
-            sync_author_images = true,
+            sync_author_images = false,
             routing_profile = ROUTING_PROFILE_FLAT,
             path_rules_file = DEFAULT_PATH_RULES_FILE,
         }

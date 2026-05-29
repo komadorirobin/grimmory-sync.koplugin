@@ -94,7 +94,7 @@ Metadata refresh can also sync Grimmory author photos into the separate Bookshel
 
 This is intended for KOReader's Bookshelf plugin, which reads author images from its own image-library folders. Grimmory Sync only writes compatible image files there; Bookshelf remains responsible for displaying them.
 
-This is enabled by default and can be toggled from:
+This integration is off by default for new installations. Enable it if you use the Bookshelf plugin:
 
 ```text
 Menu -> Tools -> Grimmory Sync -> Bookshelf integration -> Sync Bookshelf author images during metadata refresh
