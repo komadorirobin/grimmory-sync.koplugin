@@ -10,7 +10,7 @@ A KOReader plugin that syncs books from a Grimmory OPDS server to a local device
 - Automatic downloads for missing books.
 - Manifest-based metadata refresh for existing local books by safely re-downloading only changed or previously untracked EPUB files.
 - Manual OTA update checks and installation from GitHub Releases.
-- Configurable download folder profiles, including neutral defaults and optional custom path rules.
+- Configurable download folder and file naming profiles, including neutral defaults and optional custom path rules.
 - Recent-download history with quick open from KOReader.
 
 ## Installation
@@ -62,6 +62,18 @@ The menu item `Download folder profile` controls where newly downloaded books ar
 New installations default to `Library root`. Existing installations without a saved folder profile are treated as `Swedish genre example` to avoid moving an established personal library layout. Older saved personal-layout settings are migrated automatically.
 
 Custom rules may return either a Lua table or a function. Table rules can match `genre`/`genres`, `tag`/`tags`, `author`/`authors`, or a custom `when(book, helpers)` function. Grimmory OPDS categories are exposed as the same genre/tag list. A table-based example is included in `examples/path_rules.lua`.
+
+### Download File Naming
+
+The menu item `Download file naming` controls the filename used for newly downloaded EPUB files:
+
+- `Grimmory file name`: use Grimmory's original source filename when available.
+- `Grimmory Sync default`: use `Author, Firstname - Title.epub`.
+- `Calibre title-authors`: use `Title - Authors.epub`.
+
+New installations default to `Grimmory file name`. Existing installations without a saved filename profile keep `Grimmory Sync default` to avoid silently changing an established local library layout.
+
+Duplicate detection is broader than the selected filename profile. Grimmory Sync checks Grimmory's original filename, the current default format, Calibre title-authors format, and title-only fallback names before deciding a book is missing.
 
 ### Sync Source
 
@@ -120,13 +132,7 @@ Menu -> Magnifying glass -> Grimmory Sync -> Check for updates
 
 The updater checks the latest GitHub release, downloads `grimmory-sync.koplugin.zip`, extracts it over the installed plugin folder, and asks you to restart KOReader.
 
-Downloaded files are named as:
-
-```text
-Author, Firstname - Title.epub
-```
-
-Books are placed according to the selected download folder profile.
+Books are placed according to the selected download folder profile and named according to the selected download file naming profile.
 
 ## Notes
 

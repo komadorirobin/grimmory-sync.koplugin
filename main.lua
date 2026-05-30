@@ -33,12 +33,20 @@ local ROUTING_PROFILE_GENRE_SERIES = "genre_series"
 local ROUTING_PROFILE_CUSTOM = "custom"
 local ROUTING_PROFILE_SWEDISH_EXAMPLE = "swedish_genre_example"
 local LEGACY_ROUTING_PROFILE_SWEDISH_EXAMPLE = "robin_legacy"
+local FILENAME_PROFILE_GRIMMORY = "grimmory_file"
+local FILENAME_PROFILE_SYNC_DEFAULT = "sync_default"
+local FILENAME_PROFILE_CALIBRE_TITLE_AUTHORS = "calibre_title_authors"
 local ROUTING_PROFILE_LIST = {
     { id = ROUTING_PROFILE_FLAT, label = _("Library root") },
     { id = ROUTING_PROFILE_AUTHOR, label = _("Author folders") },
     { id = ROUTING_PROFILE_GENRE_SERIES, label = _("Genre/series folders") },
     { id = ROUTING_PROFILE_CUSTOM, label = _("Custom rules file") },
     { id = ROUTING_PROFILE_SWEDISH_EXAMPLE, label = _("Swedish genre example") },
+}
+local FILENAME_PROFILE_LIST = {
+    { id = FILENAME_PROFILE_GRIMMORY, label = _("Grimmory file name") },
+    { id = FILENAME_PROFILE_SYNC_DEFAULT, label = _("Grimmory Sync default") },
+    { id = FILENAME_PROFILE_CALIBRE_TITLE_AUTHORS, label = _("Calibre title-authors") },
 }
 
 local function settingToBool(value, default)
@@ -55,6 +63,15 @@ end
 
 local function isRoutingProfile(value)
     for _, profile in ipairs(ROUTING_PROFILE_LIST) do
+        if profile.id == value then
+            return true
+        end
+    end
+    return false
+end
+
+local function isFilenameProfile(value)
+    for _, profile in ipairs(FILENAME_PROFILE_LIST) do
         if profile.id == value then
             return true
         end
@@ -221,6 +238,7 @@ function GrimmorySync:loadSettings()
             sync_author_images = false,
             routing_profile = ROUTING_PROFILE_FLAT,
             path_rules_file = DEFAULT_PATH_RULES_FILE,
+            filename_profile = FILENAME_PROFILE_GRIMMORY,
             selected_feed = "",
             selected_feed_label = "",
         }
@@ -243,6 +261,13 @@ function GrimmorySync:loadSettings()
     elseif not isRoutingProfile(routing_profile) then
         routing_profile = ROUTING_PROFILE_FLAT
     end
+
+    local filename_profile = settings.filename_profile
+    if filename_profile == nil or filename_profile == "" then
+        filename_profile = FILENAME_PROFILE_SYNC_DEFAULT
+    elseif not isFilenameProfile(filename_profile) then
+        filename_profile = FILENAME_PROFILE_SYNC_DEFAULT
+    end
     
     return {
         server_url = settings.server_url or "",
@@ -252,6 +277,7 @@ function GrimmorySync:loadSettings()
         sync_author_images = settingToBool(settings.sync_author_images, true),
         routing_profile = routing_profile,
         path_rules_file = settings.path_rules_file or DEFAULT_PATH_RULES_FILE,
+        filename_profile = filename_profile,
         selected_feed = settings.selected_feed or "",
         selected_feed_label = settings.selected_feed_label or "",
     }
@@ -271,6 +297,7 @@ function GrimmorySync:saveSettings()
     file:write("sync_author_images=" .. boolToSetting(self.sync_author_images ~= false) .. "\n")
     file:write("routing_profile=" .. (self.routing_profile or ROUTING_PROFILE_FLAT) .. "\n")
     file:write("path_rules_file=" .. (self.path_rules_file or DEFAULT_PATH_RULES_FILE) .. "\n")
+    file:write("filename_profile=" .. (self.filename_profile or FILENAME_PROFILE_SYNC_DEFAULT) .. "\n")
     file:write("selected_feed=" .. (self.selected_feed or "") .. "\n")
     file:write("selected_feed_label=" .. (self.selected_feed_label or "") .. "\n")
     file:close()
@@ -451,6 +478,7 @@ function GrimmorySync:init()
     self.sync_author_images = settings.sync_author_images ~= false
     self.routing_profile = settings.routing_profile
     self.path_rules_file = settings.path_rules_file
+    self.filename_profile = settings.filename_profile
     self.selected_feed = settings.selected_feed or ""
     self.selected_feed_label = settings.selected_feed_label or ""
 end
@@ -486,6 +514,12 @@ function GrimmorySync:addToMainMenu(menu_items)
                 text = _("Download folder profile"),
                 sub_item_table_func = function()
                     return self:getRoutingProfileMenu()
+                end,
+            },
+            {
+                text = _("Download file naming"),
+                sub_item_table_func = function()
+                    return self:getFilenameProfileMenu()
                 end,
             },
             {
@@ -570,13 +604,21 @@ function GrimmorySync:routingProfileLabel(profile_id)
     return ROUTING_PROFILE_LIST[1].label
 end
 
+function GrimmorySync:filenameProfileLabel(profile_id)
+    for _, profile in ipairs(FILENAME_PROFILE_LIST) do
+        if profile.id == profile_id then
+            return profile.label
+        end
+    end
+    return FILENAME_PROFILE_LIST[1].label
+end
+
 function GrimmorySync:getRoutingProfileMenu()
     local items = {}
     for _, profile in ipairs(ROUTING_PROFILE_LIST) do
         local profile_id = profile.id
-        local profile_label = profile.label
         table.insert(items, {
-            text = profile_label,
+            text = profile.label,
             checked_func = function()
                 return (self.routing_profile or ROUTING_PROFILE_FLAT) == profile_id
             end,
@@ -584,10 +626,6 @@ function GrimmorySync:getRoutingProfileMenu()
             callback = function()
                 self.routing_profile = profile_id
                 self:saveSettings()
-                UIManager:show(InfoMessage:new{
-                    text = string.format(_("Download folder profile: %s"), profile_label),
-                    timeout = 2,
-                })
             end,
         })
     end
@@ -604,6 +642,26 @@ function GrimmorySync:getRoutingProfileMenu()
             end)
         end,
     })
+
+    return items
+end
+
+function GrimmorySync:getFilenameProfileMenu()
+    local items = {}
+    for _, profile in ipairs(FILENAME_PROFILE_LIST) do
+        local profile_id = profile.id
+        table.insert(items, {
+            text = profile.label,
+            checked_func = function()
+                return (self.filename_profile or FILENAME_PROFILE_SYNC_DEFAULT) == profile_id
+            end,
+            keep_menu_open = true,
+            callback = function()
+                self.filename_profile = profile_id
+                self:saveSettings()
+            end,
+        })
+    end
 
     return items
 end
@@ -1659,39 +1717,134 @@ function GrimmorySync:generateTargetPath(book)
     return self:normalizeTargetSubdir(target_subdir)
 end
 
-function GrimmorySync:generatePossibleFilenames(book)
-    -- Generate filename in the single unified format:
-    -- "Last, First - Title.epub"
-    -- Title already includes "Vol. X" for series books
-    
-    local filenames = {}
-    
-    local function sanitize(str)
-        if not str or str == "" then return nil end
-        -- Remove filesystem-unsafe chars but KEEP spaces and commas
-        str = str:gsub('[:<>"|?*]', '')
-        str = str:gsub('/', '-')
-        str = str:gsub('^%s+', ''):gsub('%s+$', '')
-        return str
-    end
-    
-    local author = self:convertAuthorName(book.author)
-    local safe_author = sanitize(author)
-    local safe_title = sanitize(book.title)
-    
-    if not safe_title then return filenames end
-    
-    -- Single unified format: "Author - Title.epub"
+function GrimmorySync:fileNameBase(filename)
+    filename = trim(tostring(filename or ""))
+    if filename == "" then return nil end
+    filename = filename:gsub("\\", "/")
+    return filename:match("([^/]+)$") or filename
+end
+
+function GrimmorySync:sanitizeFilename(filename)
+    filename = self:fileNameBase(filename)
+    if not filename or filename == "" then return nil end
+    filename = filename:gsub('[:<>"|?*]', '')
+    filename = filename:gsub("^%s+", ""):gsub("%s+$", "")
+    return filename ~= "" and filename or nil
+end
+
+function GrimmorySync:sanitizeFilenamePart(value)
+    if not value or value == "" then return nil end
+    value = tostring(value):gsub('[:<>"|?*]', '')
+    value = value:gsub("/", "-"):gsub("\\", "-")
+    value = value:gsub("^%s+", ""):gsub("%s+$", "")
+    return value ~= "" and value or nil
+end
+
+function GrimmorySync:withEpubExtension(filename)
+    if not filename or filename == "" then return nil end
+    if filename:match("%.[^%.]+$") then return filename end
+    return filename .. ".epub"
+end
+
+function GrimmorySync:grimmorySourceFilename(book)
+    book = book or {}
+    return self:fileNameBase(book.grimmory_file_name or book.source_file_name or book.file_name)
+end
+
+function GrimmorySync:grimmorySourceRelativePath(book)
+    book = book or {}
+    local filename = self:grimmorySourceFilename(book)
+    if not filename then return nil end
+
+    local subpath = trim(tostring(book.grimmory_file_sub_path or book.source_file_sub_path or ""))
+    subpath = subpath:gsub("\\", "/"):gsub("^/+", ""):gsub("/+$", "")
+    if subpath == "" then return filename end
+    return subpath .. "/" .. filename
+end
+
+function GrimmorySync:syncDefaultFilename(book)
+    book = book or {}
+    local safe_title = self:sanitizeFilenamePart(book.title)
+    if not safe_title then return nil end
+
+    local safe_author = self:sanitizeFilenamePart(self:convertAuthorName(book.author))
     if safe_author then
-        table.insert(filenames, string.format("%s - %s.epub", safe_author, safe_title))
-    else
-        -- Fallback if no author: add pattern for fuzzy matching
-        -- This will match any "* - Title.epub" file
-        table.insert(filenames, safe_title .. ".epub")  -- Exact match without author
-        table.insert(filenames, " - " .. safe_title .. ".epub")  -- Pattern for fuzzy match
+        return string.format("%s - %s.epub", safe_author, safe_title)
     end
-    
+    return safe_title .. ".epub"
+end
+
+function GrimmorySync:calibreTitleAuthorsFilename(book)
+    book = book or {}
+    local safe_title = self:sanitizeFilenamePart(book.title)
+    if not safe_title then return nil end
+
+    local safe_author = self:sanitizeFilenamePart(book.author)
+    if safe_author then
+        return string.format("%s - %s.epub", safe_title, safe_author)
+    end
+    return safe_title .. ".epub"
+end
+
+function GrimmorySync:preferredDownloadFilename(book)
+    local profile = self.filename_profile or FILENAME_PROFILE_SYNC_DEFAULT
+    local filename
+
+    if profile == FILENAME_PROFILE_GRIMMORY then
+        filename = self:sanitizeFilename(self:grimmorySourceFilename(book))
+    elseif profile == FILENAME_PROFILE_CALIBRE_TITLE_AUTHORS then
+        filename = self:calibreTitleAuthorsFilename(book)
+    end
+
+    filename = filename or self:syncDefaultFilename(book) or self:calibreTitleAuthorsFilename(book)
+    return self:withEpubExtension(filename or "Untitled.epub")
+end
+
+function GrimmorySync:generatePossibleFilenames(book)
+    local filenames = {}
+    local seen = {}
+
+    local function add(filename, sanitize)
+        if not filename or filename == "" then return end
+        filename = sanitize and self:sanitizeFilename(filename) or self:fileNameBase(filename)
+        filename = self:withEpubExtension(filename)
+        if filename and not seen[filename] then
+            seen[filename] = true
+            filenames[#filenames + 1] = filename
+        end
+    end
+
+    local source_filename = self:grimmorySourceFilename(book)
+    add(source_filename, false)
+    add(source_filename, true)
+    add(self:syncDefaultFilename(book), false)
+    add(self:calibreTitleAuthorsFilename(book), false)
+
+    local safe_title = self:sanitizeFilenamePart(book and book.title)
+    add(safe_title and (safe_title .. ".epub"), false)
+    if safe_title and not self:sanitizeFilenamePart(book and book.author) then
+        add(" - " .. safe_title .. ".epub", false)
+    end
+
     return filenames
+end
+
+function GrimmorySync:generatePossibleRelativePaths(book)
+    local paths = {}
+    local seen = {}
+
+    local function add(path)
+        path = trim(tostring(path or ""))
+        if path == "" then return end
+        path = path:gsub("\\", "/"):gsub("^/+", "")
+        if not seen[path] then
+            seen[path] = true
+            paths[#paths + 1] = path
+        end
+    end
+
+    add(self:grimmorySourceRelativePath(book))
+    return paths
 end
 
 function GrimmorySync:normalizeForComparison(str)
@@ -1758,6 +1911,7 @@ end
 function GrimmorySync:buildLocalBookIndex(local_books)
     local index = {
         lookup = {},
+        path_lookup = {},
         files = {},
     }
 
@@ -1765,9 +1919,12 @@ function GrimmorySync:buildLocalBookIndex(local_books)
         -- Extract just the filename from the path (could be nested like "Author - Series/1 - Title.epub")
         local filename = book.filename:match("([^/]+)$") or book.filename
         local normalized = self:normalizeForComparison(filename)
+        local normalized_path = self:normalizeForComparison((book.filename or ""):gsub("\\", "/"))
         index.lookup[normalized] = book
+        index.path_lookup[normalized_path] = book
         table.insert(index.files, {
             normalized = normalized,
+            normalized_path = normalized_path,
             book = book,
         })
         logger.info("[GrimmorySync] Local file:", normalized)
@@ -1778,10 +1935,22 @@ end
 
 function GrimmorySync:findLocalMatch(remote, local_index)
     local possible_names = self:generatePossibleFilenames(remote)
+    local possible_paths = self:generatePossibleRelativePaths(remote)
 
     logger.info("[GrimmorySync] Checking remote book:", remote.title, "author:", remote.author or "none", "series:", remote.series or "none")
+    for idx, ppath in ipairs(possible_paths) do
+        logger.info("[GrimmorySync]   Possible path", idx, ":", ppath)
+    end
     for idx, pname in ipairs(possible_names) do
         logger.info("[GrimmorySync]   Possible name", idx, ":", pname)
+    end
+
+    for _, path in ipairs(possible_paths) do
+        local normalized_path = self:normalizeForComparison(path)
+        local exact_path_match = local_index.path_lookup[normalized_path]
+        if exact_path_match then
+            return exact_path_match, path, false
+        end
     end
 
     for _, name in ipairs(possible_names) do
@@ -2226,8 +2395,13 @@ function GrimmorySync:applyBookApiMetadata(remote_books, api_books)
         local api_book = remote.book_id and by_id[tostring(remote.book_id)]
         if api_book then
             local metadata = self:bookApiMetadata(api_book)
+            local primary_file = type(api_book.primaryFile) == "table" and api_book.primaryFile or nil
             remote.hardcover_id = self:metadataFieldValue(metadata.hardcoverId)
             remote.hardcover_book_id = self:metadataFieldValue(metadata.hardcoverBookId)
+            if primary_file then
+                remote.grimmory_file_name = self:metadataFieldValue(primary_file.fileName)
+                remote.grimmory_file_sub_path = self:metadataFieldValue(primary_file.fileSubPath)
+            end
             updated = updated + 1
         end
     end
@@ -2876,10 +3050,7 @@ function GrimmorySync:downloadBook(book, target_path, options)
         -- Generate target directory path based on genres/series
         local target_subdir = self:generateTargetPath(book)
 
-        -- Generate all possible filenames and use the first one as default
-        -- This ensures downloaded files match what we search for
-        local possible_names = self:generatePossibleFilenames(book)
-        local filename_only = possible_names[1] or (book.title .. ".epub")
+        local filename_only = self:preferredDownloadFilename(book)
 
         -- Combine subdirectory and filename
         if target_subdir and target_subdir ~= "" then
@@ -3365,13 +3536,14 @@ function GrimmorySync:showStatus()
         and (self.selected_feed_label ~= "" and self.selected_feed_label or self.selected_feed)
         or _("All books")
     local text = string.format(
-        _("Server: %s\nUser: %s\nPath: %s\nLocal: %d books\nSync source: %s\nFolder profile: %s\nCustom rules: %s\nBookshelf author images: %s\nBookshelf image path: %s"),
+        _("Server: %s\nUser: %s\nPath: %s\nLocal: %d books\nSync source: %s\nFolder profile: %s\nFile naming: %s\nCustom rules: %s\nBookshelf author images: %s\nBookshelf image path: %s"),
         self.server_url ~= "" and self.server_url or _("Not set"),
         self.username ~= "" and self.username or _("Not set"),
         self.local_path,
         #books,
         sync_source,
         self:routingProfileLabel(self.routing_profile or ROUTING_PROFILE_FLAT),
+        self:filenameProfileLabel(self.filename_profile or FILENAME_PROFILE_SYNC_DEFAULT),
         self.path_rules_file or DEFAULT_PATH_RULES_FILE,
         self.sync_author_images ~= false and _("on") or _("off"),
         self:authorImagesPath()
