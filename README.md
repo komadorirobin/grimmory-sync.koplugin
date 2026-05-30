@@ -122,6 +122,7 @@ Books are placed according to the selected download folder profile.
 - Local matching is filename-based and intentionally fuzzy around common punctuation and accents.
 - Metadata refresh uses `grimmory_sync_manifest.lua` and compares stable metadata such as title, author, series, tags, description, and Hardcover IDs when available from Grimmory's authenticated book API.
 - Bookshelf author image sync uses Grimmory's authenticated `/api/v1/authors` and `/api/v1/media/author/{id}/photo` endpoints, and writes exact/slugged Bookshelf-compatible filenames.
+- The plugin UI uses English source strings wrapped with KOReader's gettext helper, so translations can be added without changing the Lua code.
 - OTA updates require a release asset named `grimmory-sync.koplugin.zip`.
 - Custom folder placement should live outside the plugin folder so OTA updates do not overwrite it.
 - KOReader must have network access to the Grimmory server.

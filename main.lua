@@ -26,6 +26,7 @@ local MAX_HISTORY = 15
 local PROGRESS_STEP_DELAY_S = 0.2
 local AUTHOR_IMAGE_EXTS = { "jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "tif" }
 local SIGNATURE_SEPARATOR = "\31"
+local ABORTED = "aborted"
 local ROUTING_PROFILE_FLAT = "flat"
 local ROUTING_PROFILE_AUTHOR = "author"
 local ROUTING_PROFILE_GENRE_SERIES = "genre_series"
@@ -33,11 +34,11 @@ local ROUTING_PROFILE_CUSTOM = "custom"
 local ROUTING_PROFILE_SWEDISH_EXAMPLE = "swedish_genre_example"
 local LEGACY_ROUTING_PROFILE_SWEDISH_EXAMPLE = "robin_legacy"
 local ROUTING_PROFILE_LIST = {
-    { id = ROUTING_PROFILE_FLAT, label = "Library root" },
-    { id = ROUTING_PROFILE_AUTHOR, label = "Author folders" },
-    { id = ROUTING_PROFILE_GENRE_SERIES, label = "Genre/series folders" },
-    { id = ROUTING_PROFILE_CUSTOM, label = "Custom rules file" },
-    { id = ROUTING_PROFILE_SWEDISH_EXAMPLE, label = "Swedish genre example" },
+    { id = ROUTING_PROFILE_FLAT, label = _("Library root") },
+    { id = ROUTING_PROFILE_AUTHOR, label = _("Author folders") },
+    { id = ROUTING_PROFILE_GENRE_SERIES, label = _("Genre/series folders") },
+    { id = ROUTING_PROFILE_CUSTOM, label = _("Custom rules file") },
+    { id = ROUTING_PROFILE_SWEDISH_EXAMPLE, label = _("Swedish genre example") },
 }
 
 local function settingToBool(value, default)
@@ -121,12 +122,12 @@ end
 local function jsonDecode(body)
     local ok_json, json = pcall(require, "json")
     if not ok_json or not json or type(json.decode) ~= "function" then
-        return nil, "Cannot load JSON parser"
+        return nil, _("Cannot load JSON parser")
     end
 
     local ok_decode, data = pcall(json.decode, body)
     if not ok_decode or type(data) ~= "table" then
-        return nil, "Could not parse JSON response"
+        return nil, _("Could not parse JSON response")
     end
     return data, nil
 end
@@ -326,7 +327,7 @@ function GrimmorySync:recordDownload(book, file_path)
     local history = self:loadHistory()
     table.insert(history, 1, {
         timestamp = os.time(),
-        title = book.title or "Okänd titel",
+        title = book.title or _("Unknown title"),
         author = book.author or "",
         path = file_path,
     })
@@ -343,7 +344,7 @@ function GrimmorySync:getRecentBooksMenu()
     if #history == 0 then
         return {
             {
-                text = _("Inga nedladdningar ännu"),
+                text = _("No downloads yet"),
                 enabled = false,
             },
         }
@@ -374,17 +375,17 @@ function GrimmorySync:getRecentBooksMenu()
         enabled = false,
     })
     table.insert(items, {
-        text = _("Rensa historik"),
+        text = _("Clear history"),
         callback = function(touchmenu_instance)
             self:runAfterMenuClose(touchmenu_instance, function()
                 UIManager:show(ConfirmBox:new{
-                    text = _("Rensa hela nedladdningshistoriken?"),
-                    ok_text = _("Rensa"),
-                    cancel_text = _("Avbryt"),
+                    text = _("Clear the entire download history?"),
+                    ok_text = _("Clear"),
+                    cancel_text = _("Cancel"),
                     ok_callback = function()
                         self:saveHistory({})
                         UIManager:show(InfoMessage:new{
-                            text = _("Historiken rensad."),
+                            text = _("History cleared."),
                             timeout = 2,
                         })
                     end,
@@ -400,7 +401,7 @@ function GrimmorySync:openRecentBook(entry)
     local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
     if not ok_lfs then
         UIManager:show(InfoMessage:new{
-            text = _("Kan inte kontrollera filen."),
+            text = _("Could not check the file."),
             timeout = 3,
         })
         return
@@ -412,7 +413,7 @@ function GrimmorySync:openRecentBook(entry)
         ReaderUI:showReader(entry.path)
     else
         UIManager:show(InfoMessage:new{
-            text = _("Filen hittades inte:\n") .. (entry.path or "okänd sökväg"),
+            text = string.format(_("File not found:\n%s"), entry.path or _("unknown path")),
             timeout = 3,
         })
     end
@@ -488,7 +489,7 @@ function GrimmorySync:addToMainMenu(menu_items)
                 end,
             },
             {
-                text = _("Senaste böckerna"),
+                text = _("Recent books"),
                 sub_item_table_func = function()
                     return self:getRecentBooksMenu()
                 end,
@@ -537,7 +538,7 @@ function GrimmorySync:getBookshelfIntegrationMenu()
             callback = function(touchmenu_instance)
                 self:runAfterMenuClose(touchmenu_instance, function()
                     UIManager:show(InfoMessage:new{
-                        text = _("Bookshelf author images are written to:\n") .. self:authorImagesPath(),
+                        text = string.format(_("Bookshelf author images are written to:\n%s"), self:authorImagesPath()),
                         timeout = 6,
                     })
                 end)
@@ -561,7 +562,7 @@ function GrimmorySync:getRoutingProfileMenu()
         local profile_id = profile.id
         local profile_label = profile.label
         table.insert(items, {
-            text = _(profile_label),
+            text = profile_label,
             checked_func = function()
                 return (self.routing_profile or ROUTING_PROFILE_FLAT) == profile_id
             end,
@@ -570,7 +571,7 @@ function GrimmorySync:getRoutingProfileMenu()
                 self.routing_profile = profile_id
                 self:saveSettings()
                 UIManager:show(InfoMessage:new{
-                    text = _("Download folder profile: ") .. _(profile_label),
+                    text = string.format(_("Download folder profile: %s"), profile_label),
                     timeout = 2,
                 })
             end,
@@ -708,7 +709,7 @@ function GrimmorySync:showPathConfig()
                         UIManager:close(input_dialog)
                         
                         UIManager:show(InfoMessage:new{
-                            text = _("✓ Configuration saved!"),
+                            text = _("Configuration saved."),
                             timeout = 2,
                         })
                     end,
@@ -864,7 +865,7 @@ function GrimmorySync:httpRequest(url, options)
     local ok_ltn12, ltn12 = pcall(require, "ltn12")
 
     if not ok_http or not ok_ltn12 then
-        return nil, "Cannot load HTTP libraries"
+        return nil, _("Cannot load HTTP libraries")
     end
 
     local headers = {}
@@ -899,11 +900,11 @@ function GrimmorySync:httpRequest(url, options)
     local body = response_body and table.concat(response_body) or true
 
     if not success then
-        return body, "Connection failed: " .. tostring(status_code), status_code, response_headers
+        return body, string.format(_("Connection failed: %s"), tostring(status_code)), status_code, response_headers
     end
 
     if status_num and (status_num < 200 or status_num >= 300) then
-        return body, "HTTP " .. status_code, status_code, response_headers
+        return body, string.format(_("HTTP %s"), tostring(status_code)), status_code, response_headers
     end
 
     return body, nil, status_code, response_headers
@@ -942,7 +943,7 @@ function GrimmorySync:fetchBooklistFromGrimmory()
         self.username, self.password = old_user, old_pass
         
         if err then
-            return nil, "OPDS endpoint requires authentication but credentials were rejected (401). Please verify username and password."
+            return nil, _("OPDS endpoint requires authentication but credentials were rejected (401). Please verify username and password.")
         end
     end
     
@@ -968,7 +969,7 @@ function GrimmorySync:fetchBooklistFromGrimmory()
     end
     
     if not catalog_link then
-        return nil, "Could not find 'All Books' catalog link in OPDS feed"
+        return nil, _("Could not find 'All Books' catalog link in OPDS feed")
     end
     
     logger.info("[GrimmorySync] Following catalog link:", catalog_link)
@@ -1483,7 +1484,7 @@ end
 
 function GrimmorySync:generatePossibleFilenames(book)
     -- Generate filename in the single unified format:
-    -- "Efternamn, Förnamn - Titel.epub"
+    -- "Last, First - Title.epub"
     -- Title already includes "Vol. X" for series books
     
     local filenames = {}
@@ -1923,7 +1924,7 @@ end
 
 function GrimmorySync:loginToGrimmoryApi()
     if self.username == "" or self.password == "" then
-        return nil, "Grimmory API sync requires username and password."
+        return nil, _("Grimmory API sync requires username and password.")
     end
 
     local body = jsonObject({
@@ -1953,7 +1954,7 @@ function GrimmorySync:loginToGrimmoryApi()
     end
 
     if type(data.accessToken) ~= "string" or data.accessToken == "" then
-        return nil, "No access token returned by Grimmory."
+        return nil, _("No access token returned by Grimmory.")
     end
 
     return data.accessToken, nil
@@ -2028,7 +2029,7 @@ function GrimmorySync:fetchBookMetadataFromGrimmoryApi(token)
 
     local books = self:extractBooksArray(data)
     if not books then
-        return nil, "Could not find books array in Grimmory API response."
+        return nil, _("Could not find books array in Grimmory API response.")
     end
 
     return books, nil
@@ -2121,7 +2122,7 @@ function GrimmorySync:fetchAuthorsFromGrimmory(token)
             logger.info("[GrimmorySync] Parsed authors from unknown response shape:", #fallback_authors)
             return fallback_authors, nil
         end
-        return nil, "Could not find authors array in Grimmory response."
+        return nil, _("Could not find authors array in Grimmory response.")
     end
 
     logger.info("[GrimmorySync] Authors returned by Grimmory:", #authors)
@@ -2152,17 +2153,17 @@ function GrimmorySync:downloadAuthorImage(author, token)
     local name = self:authorDisplayName(author)
 
     if not id or tostring(id) == "" or name == "" then
-        return false, "Author is missing id or name."
+        return false, _("Author is missing id or name.")
     end
 
     local stems = self:authorImageStems(name)
     if #stems == 0 then
-        return false, "Could not create a Bookshelf image filename for " .. name
+        return false, string.format(_("Could not create a Bookshelf image filename for %s"), name)
     end
 
     local image_dir = self:authorImagesPath()
     if not self:ensureDirectory(image_dir) then
-        return false, "Could not create Bookshelf author image directory."
+        return false, _("Could not create Bookshelf author image directory.")
     end
 
     local tmp_path = image_dir .. "/.grimmory-author-" .. tostring(id) .. ".tmp"
@@ -2170,7 +2171,7 @@ function GrimmorySync:downloadAuthorImage(author, token)
 
     local file = io.open(tmp_path, "wb")
     if not file then
-        return false, "Could not create temporary author image file."
+        return false, _("Could not create temporary author image file.")
     end
 
     local image_url = "/api/v1/media/author/" .. tostring(id) .. "/photo"
@@ -2207,7 +2208,7 @@ function GrimmorySync:downloadAuthorImage(author, token)
 
     if self.abort_sync then
         pcall(os.remove, tmp_path)
-        return false, "Avbruten"
+        return false, ABORTED
     end
 
     local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
@@ -2215,7 +2216,7 @@ function GrimmorySync:downloadAuthorImage(author, token)
         local attr = lfs.attributes(tmp_path)
         if not attr or attr.size == 0 then
             pcall(os.remove, tmp_path)
-            return false, "Downloaded author image was empty for " .. name
+            return false, string.format(_("Downloaded author image was empty for %s"), name)
         end
     end
 
@@ -2225,7 +2226,7 @@ function GrimmorySync:downloadAuthorImage(author, token)
     local ok_rename, rename_err = os.rename(tmp_path, primary)
     if not ok_rename then
         pcall(os.remove, tmp_path)
-        return false, rename_err or "Could not save author image."
+        return false, rename_err or _("Could not save author image.")
     end
     self:removeAuthorImageVariants(image_dir, stems[1], ext)
 
@@ -2248,17 +2249,17 @@ function GrimmorySync:syncAuthorImagesAsync(done_callback)
     end
 
     local ok, token_or_err, authors_or_err = pcall(function()
-        self:showProgressDialog("Loggar in för författarbilder...")
+        self:showProgressDialog(_("Signing in for Bookshelf author images..."))
         local token, err = self:loginToGrimmoryApi()
         if not token then
             logger.warn("[GrimmorySync] Token login for author images failed; trying Basic auth:", err)
         end
 
         if self.abort_sync then
-            return nil, "Avbruten"
+            return nil, ABORTED
         end
 
-        self:showProgressDialog("Hämtar författare från Grimmory...")
+        self:showProgressDialog(_("Fetching authors from Grimmory..."))
         local authors, authors_err = self:fetchAuthorsFromGrimmory(token)
         if not authors then
             if err then
@@ -2278,7 +2279,7 @@ function GrimmorySync:syncAuthorImagesAsync(done_callback)
     local token = token_or_err
     local authors = authors_or_err
     if type(authors) ~= "table" then
-        done_callback(false, { enabled = true, error = authors or token or "unknown error" })
+        done_callback(false, { enabled = true, error = authors or token or _("unknown error") })
         return
     end
 
@@ -2322,7 +2323,7 @@ function GrimmorySync:syncAuthorImagesAsync(done_callback)
         if self.abort_sync then
             done_callback(false, {
                 enabled = true,
-                error = "Avbruten",
+                error = ABORTED,
                 authors = #authors,
                 synced = synced,
                 existing = existing,
@@ -2353,10 +2354,10 @@ function GrimmorySync:syncAuthorImagesAsync(done_callback)
         local author = queue[i]
         local name = self:authorDisplayName(author)
         self:showProgressDialog(string.format(
-            "Synkar författarbild %d av %d...\n\n%s\n\nUppdaterade: %d\nRedan fanns: %d\nMisslyckade: %d\n\nTryck Avbryt för att stoppa efter pågående bild.",
+            _("Syncing author image %d of %d...\n\n%s\n\nUpdated: %d\nAlready existed: %d\nFailed: %d\n\nTap Cancel to stop after the current image."),
             i,
             #queue,
-            name ~= "" and name or "Okänd författare",
+            name ~= "" and name or _("Unknown author"),
             synced,
             existing,
             failed
@@ -2383,13 +2384,13 @@ function GrimmorySync:metadataRefreshMessage(stats, result, image_ok, image_resu
 
     local title
     if (result.refreshed or 0) == 0 then
-        title = "✓ Metadata redan aktuell!"
+        title = _("Metadata already up to date.")
     else
-        title = "✓ Metadata uppdaterad!"
+        title = _("Metadata updated.")
     end
 
     local message = string.format(
-        "%s\n\nLokala: %d böcker\nServern: %d böcker\nUppdaterade: %d böcker\nHoppade över: %d böcker",
+        _("%s\n\nLocal: %d books\nServer: %d books\nUpdated: %d books\nSkipped: %d books"),
         title,
         stats.local_count or 0,
         stats.remote_count or 0,
@@ -2400,25 +2401,25 @@ function GrimmorySync:metadataRefreshMessage(stats, result, image_ok, image_resu
     if image_result and image_result.enabled then
         if image_ok then
             message = message .. string.format(
-                "\n\nBookshelf-författarbilder: %d uppdaterade\nRedan fanns: %d\nUtan bild: %d\nMisslyckade: %d",
+                _("\n\nBookshelf author images: %d updated\nAlready existed: %d\nWithout image: %d\nFailed: %d"),
                 image_result.synced or 0,
                 image_result.existing or 0,
                 image_result.skipped or 0,
                 image_result.failed or 0
             )
             if (image_result.failed or 0) > 0 and image_result.last_error then
-                message = message .. "\nSenaste fel: " .. tostring(image_result.last_error)
+                message = message .. "\n" .. string.format(_("Latest error: %s"), tostring(image_result.last_error))
             end
-        elseif image_result.error == "Avbruten" then
+        elseif image_result.error == ABORTED then
             message = message .. string.format(
-                "\n\nBookshelf-författarbildsynk avbruten.\nUppdaterade: %d\nRedan fanns: %d\nKvar: %d",
+                _("\n\nBookshelf author image sync canceled.\nUpdated: %d\nAlready existed: %d\nRemaining: %d"),
                 image_result.synced or 0,
                 image_result.existing or 0,
                 image_result.remaining or 0
             )
         else
-            message = message .. "\n\nBookshelf-författarbilder misslyckades: "
-                .. tostring(image_result.error or "unknown error")
+            message = message .. "\n\n"
+                .. string.format(_("Bookshelf author images failed: %s"), tostring(image_result.error or _("unknown error")))
         end
     end
 
@@ -2458,7 +2459,7 @@ function GrimmorySync:compareAndDownload(local_books, remote_books)
         end
         
         self:showProgressDialog(string.format(
-            "Laddar ner bok %d av %d...\n\n%s\n\nTryck Avbryt för att stoppa efter pågående fil.",
+            _("Downloading book %d of %d...\n\n%s\n\nTap Cancel to stop after the current file."),
             i,
             #missing,
             book.title
@@ -2539,7 +2540,7 @@ function GrimmorySync:refreshExistingMetadata(local_books, remote_books)
         end
 
         self:showProgressDialog(string.format(
-            "Uppdaterar metadata %d av %d...\n\n%s\n\nHoppade över oförändrade: %d\n\nTryck Avbryt för att stoppa efter pågående fil.",
+            _("Refreshing metadata %d of %d...\n\n%s\n\nSkipped unchanged: %d\n\nTap Cancel to stop after the current file."),
             i,
             #matched,
             item.remote.title,
@@ -2577,7 +2578,7 @@ function GrimmorySync:refreshExistingMetadataAsync(matched, skipped, manifest, d
         if self.abort_sync then
             logger.info("[GrimmorySync] Metadata refresh aborted by user")
             finish(false, {
-                error = "Avbruten",
+                error = ABORTED,
                 refreshed = count,
                 skipped = skipped or 0,
                 remaining = total - count,
@@ -2597,7 +2598,7 @@ function GrimmorySync:refreshExistingMetadataAsync(matched, skipped, manifest, d
 
         local item = matched[i]
         self:showProgressDialog(string.format(
-            "Uppdaterar metadata %d av %d...\n\n%s\n\nUppdaterade: %d\nHoppade över oförändrade: %d\n\nTryck Avbryt för att stoppa efter pågående fil.",
+            _("Refreshing metadata %d of %d...\n\n%s\n\nUpdated: %d\nSkipped unchanged: %d\n\nTap Cancel to stop after the current file."),
             i,
             total,
             item.remote.title,
@@ -2842,7 +2843,7 @@ function GrimmorySync:requestAbort(message)
     self.abort_notified = true
     self:closeProgressDialog()
     UIManager:show(InfoMessage:new{
-        text = message or _("Avbryter efter pågående nedladdning..."),
+        text = message or _("Stopping after the current download..."),
         timeout = 2,
     })
 end
@@ -2860,9 +2861,9 @@ function GrimmorySync:showProgressDialog(text)
         buttons = {
             {
                 {
-                    text = _("Avbryt"),
+                    text = _("Cancel"),
                     callback = function()
-                        self:requestAbort(_("Synken avbryts efter pågående fil..."))
+                        self:requestAbort(_("Sync will stop after the current file..."))
                     end,
                 },
             },
@@ -2908,9 +2909,9 @@ function GrimmorySync:startSync()
     -- Show confirmation with cancel option
     local confirm_dialog
     confirm_dialog = ConfirmBox:new{
-        text = _("Synka saknade böcker?\n\nEndast böcker som saknas på enheten laddas ner. Du kan avbryta när som helst."),
-        ok_text = _("Starta"),
-        cancel_text = _("Avbryt"),
+        text = _("Sync missing books?\n\nOnly books missing from this device will be downloaded. You can cancel at any time."),
+        ok_text = _("Start"),
+        cancel_text = _("Cancel"),
         ok_callback = function()
             pcall(function() UIManager:close(confirm_dialog) end)
             UIManager:scheduleIn(0, function()
@@ -2943,9 +2944,9 @@ function GrimmorySync:startMetadataRefresh()
 
     local confirm_dialog
     confirm_dialog = ConfirmBox:new{
-        text = _("Uppdatera metadata i befintliga böcker?\n\nPluginet laddar om matchade EPUB-filer från Grimmory och ersätter lokala filer först efter att nedladdningen har verifierats. Saknade böcker laddas inte ner här."),
-        ok_text = _("Uppdatera"),
-        cancel_text = _("Avbryt"),
+        text = _("Refresh metadata in existing books?\n\nThe plugin will download matched EPUB files again from Grimmory and replace local files only after the download has been verified. Missing books are not downloaded here."),
+        ok_text = _("Refresh"),
+        cancel_text = _("Cancel"),
         ok_callback = function()
             pcall(function() UIManager:close(confirm_dialog) end)
             UIManager:scheduleIn(0, function()
@@ -2957,18 +2958,18 @@ function GrimmorySync:startMetadataRefresh()
 end
 
 function GrimmorySync:performSync()
-    self:showProgressDialog("Skannar lokala böcker...")
+    self:showProgressDialog(_("Scanning local books..."))
     
     local ok, success, count_or_err = pcall(function()
         local local_books = self:scanLocalBooks()
         logger.info("[GrimmorySync] Local books found:", #local_books)
         
         if self.abort_sync then
-            return false, "Avbruten"
+            return false, ABORTED
         end
         
         self:showProgressDialog(string.format(
-            "Hämtar böcker från server...\n\nLokala böcker: %d\n\nTryck Avbryt för att stoppa efter pågående steg.",
+            _("Fetching books from server...\n\nLocal books: %d\n\nTap Cancel to stop after the current step."),
             #local_books
         ))
         
@@ -2979,12 +2980,12 @@ function GrimmorySync:performSync()
         end
         
         if self.abort_sync then
-            return false, "Avbruten"
+            return false, ABORTED
         end
         
         logger.info("[GrimmorySync] Remote books found:", #remote_books)
 
-        self:showProgressDialog("Hämtar extra metadata från Grimmory...")
+        self:showProgressDialog(_("Fetching extra metadata from Grimmory..."))
         local enriched, enrich_result = self:enrichRemoteBooksWithBookApiMetadata(remote_books)
         if enriched then
             logger.info("[GrimmorySync] Book API metadata applied:", enrich_result)
@@ -2993,11 +2994,11 @@ function GrimmorySync:performSync()
         end
 
         if self.abort_sync then
-            return false, "Avbruten"
+            return false, ABORTED
         end
         
         self:showProgressDialog(string.format(
-            "Jämför och laddar ner...\n\nLokala: %d\nServern: %d\n\nTryck Avbryt för att stoppa efter pågående fil.",
+            _("Comparing and downloading...\n\nLocal: %d\nServer: %d\n\nTap Cancel to stop after the current file."),
             #local_books,
             #remote_books
         ))
@@ -3010,7 +3011,7 @@ function GrimmorySync:performSync()
     
     if not ok then
         UIManager:show(InfoMessage:new{
-            text = _("Sync error: ") .. tostring(success),
+            text = string.format(_("Sync error: %s"), tostring(success)),
             timeout = 5,
         })
         logger.err("[GrimmorySync] Sync error:", success)
@@ -3018,9 +3019,9 @@ function GrimmorySync:performSync()
     end
     
     if not success then
-        if count_or_err ~= "Avbruten" then
+        if count_or_err ~= ABORTED then
             UIManager:show(InfoMessage:new{
-                text = _("Error: ") .. tostring(count_or_err),
+                text = string.format(_("Error: %s"), tostring(count_or_err)),
                 timeout = 5,
             })
             logger.err("[GrimmorySync] Error:", count_or_err)
@@ -3030,7 +3031,7 @@ function GrimmorySync:performSync()
     
     local stats = count_or_err
     local message = string.format(
-        "✓ Synk klar!\n\nLokala: %d böcker\nServern: %d böcker\nNedladdade saknade: %d böcker",
+        _("Sync complete.\n\nLocal: %d books\nServer: %d books\nDownloaded missing: %d books"),
         stats.local_count or 0,
         stats.remote_count or 0,
         stats.downloaded or 0
@@ -3043,18 +3044,18 @@ function GrimmorySync:performSync()
 end
 
 function GrimmorySync:performMetadataRefresh()
-    self:showProgressDialog("Skannar lokala böcker...")
+    self:showProgressDialog(_("Scanning local books..."))
 
     local ok, success, payload = pcall(function()
         local local_books = self:scanLocalBooks()
         logger.info("[GrimmorySync] Local books found:", #local_books)
 
         if self.abort_sync then
-            return false, "Avbruten"
+            return false, ABORTED
         end
 
         self:showProgressDialog(string.format(
-            "Hämtar böcker från server...\n\nLokala böcker: %d\n\nTryck Avbryt för att stoppa efter pågående steg.",
+            _("Fetching books from server...\n\nLocal books: %d\n\nTap Cancel to stop after the current step."),
             #local_books
         ))
 
@@ -3065,12 +3066,12 @@ function GrimmorySync:performMetadataRefresh()
         end
 
         if self.abort_sync then
-            return false, "Avbruten"
+            return false, ABORTED
         end
 
         logger.info("[GrimmorySync] Remote books found:", #remote_books)
 
-        self:showProgressDialog("Hämtar extra metadata från Grimmory...")
+        self:showProgressDialog(_("Fetching extra metadata from Grimmory..."))
         local enriched, enrich_result = self:enrichRemoteBooksWithBookApiMetadata(remote_books)
         if enriched then
             logger.info("[GrimmorySync] Book API metadata applied:", enrich_result)
@@ -3079,11 +3080,11 @@ function GrimmorySync:performMetadataRefresh()
         end
 
         if self.abort_sync then
-            return false, "Avbruten"
+            return false, ABORTED
         end
 
         self:showProgressDialog(string.format(
-            "Matchar befintliga böcker...\n\nLokala: %d\nServern: %d",
+            _("Matching existing books...\n\nLocal: %d\nServer: %d"),
             #local_books,
             #remote_books
         ))
@@ -3104,7 +3105,7 @@ function GrimmorySync:performMetadataRefresh()
     if not ok then
         self:closeProgressDialog()
         UIManager:show(InfoMessage:new{
-            text = _("Metadata refresh error: ") .. tostring(success),
+            text = string.format(_("Metadata refresh error: %s"), tostring(success)),
             timeout = 5,
         })
         logger.err("[GrimmorySync] Metadata refresh error:", success)
@@ -3113,9 +3114,9 @@ function GrimmorySync:performMetadataRefresh()
 
     if not success then
         self:closeProgressDialog()
-        if payload ~= "Avbruten" then
+        if payload ~= ABORTED then
             UIManager:show(InfoMessage:new{
-                text = _("Error: ") .. tostring(payload),
+                text = string.format(_("Error: %s"), tostring(payload)),
                 timeout = 5,
             })
             logger.err("[GrimmorySync] Metadata refresh error:", payload)
@@ -3158,10 +3159,10 @@ function GrimmorySync:performMetadataRefresh()
         self:closeProgressDialog()
         result = result or {}
         if not done_ok then
-            if result.error == "Avbruten" then
+            if result.error == ABORTED then
                 UIManager:show(InfoMessage:new{
                     text = string.format(
-                        "Metadatauppdatering avbruten.\n\nUppdaterade: %d böcker\nKvar: %d böcker",
+                        _("Metadata refresh canceled.\n\nUpdated: %d books\nRemaining: %d books"),
                         result.refreshed or 0,
                         result.remaining or 0
                     ),
@@ -3169,7 +3170,7 @@ function GrimmorySync:performMetadataRefresh()
                 })
             else
                 UIManager:show(InfoMessage:new{
-                    text = _("Error: ") .. tostring(result.error or "unknown"),
+                    text = string.format(_("Error: %s"), tostring(result.error or _("unknown"))),
                     timeout = 5,
                 })
                 logger.err("[GrimmorySync] Metadata refresh error:", result.error)
@@ -3184,14 +3185,14 @@ end
 function GrimmorySync:showStatus()
     local books = self:scanLocalBooks()
     local text = string.format(
-        "Server: %s\nUser: %s\nPath: %s\nLocal: %d books\nFolder profile: %s\nCustom rules: %s\nBookshelf author images: %s\nBookshelf image path: %s",
-        self.server_url ~= "" and self.server_url or "Not set",
-        self.username ~= "" and self.username or "Not set",
+        _("Server: %s\nUser: %s\nPath: %s\nLocal: %d books\nFolder profile: %s\nCustom rules: %s\nBookshelf author images: %s\nBookshelf image path: %s"),
+        self.server_url ~= "" and self.server_url or _("Not set"),
+        self.username ~= "" and self.username or _("Not set"),
         self.local_path,
         #books,
         self:routingProfileLabel(self.routing_profile or ROUTING_PROFILE_FLAT),
         self.path_rules_file or DEFAULT_PATH_RULES_FILE,
-        self.sync_author_images ~= false and "on" or "off",
+        self.sync_author_images ~= false and _("on") or _("off"),
         self:authorImagesPath()
     )
     
