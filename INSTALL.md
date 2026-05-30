@@ -52,7 +52,7 @@ adb push grimmory-sync.koplugin /storage/emulated/0/koreader/plugins/
 
 1. Öppna KOReader
 2. Tryck på menyikonen (☰) överst till vänster
-3. Scrolla ner till **"Verktyg"** / **"Tools"**
+3. Öppna **förstoringsglas-menyn** / **magnifying glass menu**
 4. Du bör se **"Grimmory Sync"** i listan
 
 Om du INTE ser "Grimmory Sync":
@@ -73,10 +73,10 @@ Om du INTE ser "Grimmory Sync":
 
 När pluginet syns i menyn:
 
-1. **Gå till: Meny → Verktyg → Grimmory Sync → Konfigurera server**
+1. **Gå till: Meny → Förstoringsglas → Grimmory Sync → Configure**
 2. Ange din Macs IP-adress och port (t.ex. `http://192.168.1.100:6060`)
 3. Ange användarnamn och lösenord för Grimmory
-4. **Gå till: Meny → Verktyg → Grimmory Sync → Sync missing books**
+4. **Gå till: Meny → Förstoringsglas → Grimmory Sync → Sync missing books**
 5. Vänta medan pluginet laddar ner dina böcker! 📚
 
 ## ℹ️ Hitta din Macs IP-adress

@@ -35,7 +35,7 @@ Restart KOReader after copying the plugin.
 Open KOReader and go to:
 
 ```text
-Menu -> Tools -> Grimmory Sync -> Configure
+Menu -> Magnifying glass -> Grimmory Sync -> Configure
 ```
 
 Set:
@@ -66,7 +66,7 @@ Custom rules may return either a Lua table or a function. A table-based example 
 To download books that exist in Grimmory but are missing locally, run:
 
 ```text
-Menu -> Tools -> Grimmory Sync -> Sync missing books
+Menu -> Magnifying glass -> Grimmory Sync -> Sync missing books
 ```
 
 The plugin will:
@@ -79,7 +79,7 @@ The plugin will:
 To refresh descriptions and other metadata that Grimmory has written into existing EPUB files, run:
 
 ```text
-Menu -> Tools -> Grimmory Sync -> Refresh existing metadata
+Menu -> Magnifying glass -> Grimmory Sync -> Refresh existing metadata
 ```
 
 This replaces matched local EPUB files with freshly downloaded copies from Grimmory when their remote metadata signature has changed. The first run creates `grimmory_sync_manifest.lua` and may refresh all matched books once; later runs skip unchanged books. The replacement is conservative: the plugin downloads to a temporary file, verifies that it is not empty, backs up the existing file, and only then moves the new file into place.
@@ -97,13 +97,13 @@ This is intended for KOReader's Bookshelf plugin, which reads author images from
 This integration is off by default for new installations. Enable it if you use the Bookshelf plugin:
 
 ```text
-Menu -> Tools -> Grimmory Sync -> Bookshelf integration -> Sync Bookshelf author images during metadata refresh
+Menu -> Magnifying glass -> Grimmory Sync -> Bookshelf integration -> Sync Bookshelf author images during metadata refresh
 ```
 
 To update the plugin directly from KOReader, run:
 
 ```text
-Menu -> Tools -> Grimmory Sync -> Check for updates
+Menu -> Magnifying glass -> Grimmory Sync -> Check for updates
 ```
 
 The updater checks the latest GitHub release, downloads `grimmory-sync.koplugin.zip`, extracts it over the installed plugin folder, and asks you to restart KOReader.
