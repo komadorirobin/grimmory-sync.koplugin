@@ -3,5 +3,5 @@ return {
     name = "grimmorysync",
     fullname = _("Grimmory Sync"),
     description = _("Sync books and metadata from a Grimmory OPDS server"),
-    version = "0.5.17",
+    version = "0.5.18",
 }
