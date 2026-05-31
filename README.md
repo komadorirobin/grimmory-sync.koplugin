@@ -9,6 +9,7 @@ A KOReader plugin that syncs books from a Grimmory OPDS server to a local device
 - Basic-auth support for protected Grimmory instances.
 - Automatic downloads for missing books.
 - Manifest-based metadata refresh for existing local books by safely re-downloading only changed or previously untracked EPUB files.
+- Optional automatic metadata refresh at startup or on an interval, with an opt-in OPDS timestamp trigger.
 - Manual OTA update checks and installation from GitHub Releases.
 - Configurable download folder and file naming profiles, including neutral defaults and optional custom path rules.
 - Recent-download history with quick open from KOReader.
@@ -108,6 +109,26 @@ Menu -> Magnifying glass -> Grimmory Sync -> Refresh existing metadata
 
 This replaces matched local EPUB files with freshly downloaded copies from Grimmory when their remote metadata signature has changed. The first run creates `grimmory_sync_manifest.lua` and may refresh all matched books once; later runs skip unchanged books. The replacement is conservative: the plugin downloads to a temporary file, verifies that it is not empty, backs up the existing file, and only then moves the new file into place.
 
+The currently open book is skipped during metadata refresh so KOReader is not reading from a file while Grimmory Sync replaces it. Close the book or open another book, then run refresh again if the skipped book also needs an update.
+
+### Automatic Metadata Refresh
+
+Automatic metadata refresh is off by default. Enable it from:
+
+```text
+Menu -> Magnifying glass -> Grimmory Sync -> Automatic metadata refresh
+```
+
+Available options:
+
+- `Check at startup`: run one automatic metadata refresh shortly after KOReader starts.
+- `Check interval`: run automatic checks while KOReader is awake, for example every 6 or 12 hours.
+- `Use OPDS updated timestamp as refresh trigger`: also refresh a matched book when Grimmory's OPDS `<updated>` timestamp for that book changes.
+
+Automatic checks scan the local library and contact Grimmory, so they can use more battery than manual-only syncing. The interval timer is cancelled while KOReader is suspended and restarted on resume.
+
+By default, automatic refresh uses the same stable metadata signature as manual refresh. The OPDS timestamp trigger is opt-in because it can catch server-side EPUB rewrites that are not visible in the stable metadata fields, but it may also refresh books after other Grimmory-side changes such as rescans or internal updates.
+
 ### Bookshelf Integration
 
 Metadata refresh can also sync Grimmory author photos into the separate Bookshelf plugin's default author image library:
@@ -138,7 +159,7 @@ Books are placed according to the selected download folder profile and named acc
 
 - The current download implementation prefers EPUB acquisition links.
 - Local matching is filename-based and intentionally fuzzy around common punctuation and accents.
-- Metadata refresh uses `grimmory_sync_manifest.lua` and compares stable metadata such as title, author, series, tags, description, and Hardcover IDs when available from Grimmory's authenticated book API.
+- Metadata refresh uses `grimmory_sync_manifest.lua` and compares stable metadata such as title, author, series, tags, description, and Hardcover IDs when available from Grimmory's authenticated book API. If enabled, the OPDS timestamp trigger also compares each book entry's `<updated>` value.
 - Bookshelf author image sync uses Grimmory's authenticated `/api/v1/authors` and `/api/v1/media/author/{id}/photo` endpoints, and writes exact/slugged Bookshelf-compatible filenames.
 - The plugin UI uses English source strings wrapped with KOReader's gettext helper, so translations can be added without changing the Lua code.
 - OTA updates require a release asset named `grimmory-sync.koplugin.zip`.

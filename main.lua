@@ -48,6 +48,14 @@ local FILENAME_PROFILE_LIST = {
     { id = FILENAME_PROFILE_SYNC_DEFAULT, label = _("Grimmory Sync default") },
     { id = FILENAME_PROFILE_CALIBRE_TITLE_AUTHORS, label = _("Calibre title-authors") },
 }
+local AUTO_REFRESH_INTERVAL_LIST = {
+    { hours = 0, label = _("Off") },
+    { hours = 1, label = _("Every hour") },
+    { hours = 3, label = _("Every 3 hours") },
+    { hours = 6, label = _("Every 6 hours") },
+    { hours = 12, label = _("Every 12 hours") },
+    { hours = 24, label = _("Daily") },
+}
 
 local function settingToBool(value, default)
     if value == nil or value == "" then
@@ -59,6 +67,14 @@ end
 
 local function boolToSetting(value)
     return value and "true" or "false"
+end
+
+local function settingToNumber(value, default)
+    local number = tonumber(value)
+    if number == nil then
+        return default
+    end
+    return number
 end
 
 local function isRoutingProfile(value)
@@ -77,6 +93,16 @@ local function isFilenameProfile(value)
         end
     end
     return false
+end
+
+local function normalizeAutoRefreshInterval(value)
+    local hours = tonumber(value) or 0
+    for _, interval in ipairs(AUTO_REFRESH_INTERVAL_LIST) do
+        if interval.hours == hours then
+            return interval.hours
+        end
+    end
+    return 0
 end
 
 local function trim(str)
@@ -241,6 +267,10 @@ function GrimmorySync:loadSettings()
             filename_profile = FILENAME_PROFILE_GRIMMORY,
             selected_feed = "",
             selected_feed_label = "",
+            auto_refresh_on_startup = false,
+            auto_refresh_interval_hours = 0,
+            auto_refresh_use_opds_updated = false,
+            auto_refresh_last_check = 0,
         }
     end
     
@@ -280,6 +310,10 @@ function GrimmorySync:loadSettings()
         filename_profile = filename_profile,
         selected_feed = settings.selected_feed or "",
         selected_feed_label = settings.selected_feed_label or "",
+        auto_refresh_on_startup = settingToBool(settings.auto_refresh_on_startup, false),
+        auto_refresh_interval_hours = normalizeAutoRefreshInterval(settings.auto_refresh_interval_hours),
+        auto_refresh_use_opds_updated = settingToBool(settings.auto_refresh_use_opds_updated, false),
+        auto_refresh_last_check = settingToNumber(settings.auto_refresh_last_check, 0),
     }
 end
 
@@ -300,6 +334,10 @@ function GrimmorySync:saveSettings()
     file:write("filename_profile=" .. (self.filename_profile or FILENAME_PROFILE_SYNC_DEFAULT) .. "\n")
     file:write("selected_feed=" .. (self.selected_feed or "") .. "\n")
     file:write("selected_feed_label=" .. (self.selected_feed_label or "") .. "\n")
+    file:write("auto_refresh_on_startup=" .. boolToSetting(self.auto_refresh_on_startup == true) .. "\n")
+    file:write("auto_refresh_interval_hours=" .. tostring(self.auto_refresh_interval_hours or 0) .. "\n")
+    file:write("auto_refresh_use_opds_updated=" .. boolToSetting(self.auto_refresh_use_opds_updated == true) .. "\n")
+    file:write("auto_refresh_last_check=" .. tostring(self.auto_refresh_last_check or 0) .. "\n")
     file:close()
 end
 
@@ -465,6 +503,91 @@ function GrimmorySync:runAfterMenuClose(touchmenu_instance, callback)
     UIManager:scheduleIn(0.1, callback)
 end
 
+function GrimmorySync:autoRefreshIntervalLabel(hours)
+    hours = normalizeAutoRefreshInterval(hours)
+    for _, interval in ipairs(AUTO_REFRESH_INTERVAL_LIST) do
+        if interval.hours == hours then
+            return interval.label
+        end
+    end
+    return AUTO_REFRESH_INTERVAL_LIST[1].label
+end
+
+function GrimmorySync:autoRefreshIntervalSeconds()
+    local hours = normalizeAutoRefreshInterval(self.auto_refresh_interval_hours)
+    if hours <= 0 then
+        return 0
+    end
+    return hours * 60 * 60
+end
+
+function GrimmorySync:automaticMetadataRefreshEnabled()
+    return (self.auto_refresh_on_startup == true or self:autoRefreshIntervalSeconds() > 0)
+        and self.server_url ~= nil
+        and self.server_url ~= ""
+end
+
+function GrimmorySync:cancelAutomaticMetadataRefreshTimer()
+    if self.auto_refresh_timer then
+        UIManager:unschedule(self.auto_refresh_timer)
+        self.auto_refresh_timer = nil
+    end
+end
+
+function GrimmorySync:nextAutomaticMetadataRefreshDelay()
+    if self.auto_refresh_startup_pending and self.auto_refresh_on_startup == true then
+        return 10, "startup"
+    end
+
+    local interval = self:autoRefreshIntervalSeconds()
+    if interval <= 0 then
+        return nil, nil
+    end
+
+    local last_check = tonumber(self.auto_refresh_last_check) or 0
+    if last_check <= 0 then
+        return interval, "interval"
+    end
+
+    local elapsed = os.time() - last_check
+    return math.max(10, interval - elapsed), "interval"
+end
+
+function GrimmorySync:scheduleAutomaticMetadataRefresh(delay, reason)
+    self:cancelAutomaticMetadataRefreshTimer()
+    if not delay or delay <= 0 then
+        return
+    end
+
+    self.auto_refresh_timer = function()
+        self.auto_refresh_timer = nil
+        self:performAutomaticMetadataRefresh(reason)
+    end
+
+    UIManager:scheduleIn(delay, self.auto_refresh_timer)
+    logger.info("[GrimmorySync] Scheduled automatic metadata refresh in", delay, "seconds")
+end
+
+function GrimmorySync:configureAutomaticMetadataRefresh()
+    self:cancelAutomaticMetadataRefreshTimer()
+    if not self:automaticMetadataRefreshEnabled() then
+        return
+    end
+
+    local delay, reason = self:nextAutomaticMetadataRefreshDelay()
+    if delay then
+        self:scheduleAutomaticMetadataRefresh(delay, reason)
+    end
+end
+
+function GrimmorySync:onResume()
+    self:configureAutomaticMetadataRefresh()
+end
+
+function GrimmorySync:onSuspend()
+    self:cancelAutomaticMetadataRefreshTimer()
+end
+
 function GrimmorySync:init()
     if self.ui and self.ui.menu then
         self.ui.menu:registerToMainMenu(self)
@@ -481,6 +604,14 @@ function GrimmorySync:init()
     self.filename_profile = settings.filename_profile
     self.selected_feed = settings.selected_feed or ""
     self.selected_feed_label = settings.selected_feed_label or ""
+    self.auto_refresh_on_startup = settings.auto_refresh_on_startup == true
+    self.auto_refresh_interval_hours = normalizeAutoRefreshInterval(settings.auto_refresh_interval_hours)
+    self.auto_refresh_use_opds_updated = settings.auto_refresh_use_opds_updated == true
+    self.auto_refresh_last_check = settings.auto_refresh_last_check or 0
+    self.auto_refresh_startup_pending = self.auto_refresh_on_startup == true
+    self.auto_refresh_running = false
+    self.sync_running = false
+    self:configureAutomaticMetadataRefresh()
 end
 
 function GrimmorySync:addToMainMenu(menu_items)
@@ -502,6 +633,12 @@ function GrimmorySync:addToMainMenu(menu_items)
                     self:runAfterMenuClose(touchmenu_instance, function()
                         self:startMetadataRefresh()
                     end)
+                end,
+            },
+            {
+                text = _("Automatic metadata refresh"),
+                sub_item_table_func = function()
+                    return self:getAutomaticMetadataRefreshMenu()
                 end,
             },
             {
@@ -593,6 +730,65 @@ function GrimmorySync:getBookshelfIntegrationMenu()
             end,
         },
     }
+end
+
+function GrimmorySync:getAutomaticMetadataRefreshMenu()
+    return {
+        {
+            text = _("Check at startup"),
+            checked_func = function()
+                return self.auto_refresh_on_startup == true
+            end,
+            keep_menu_open = true,
+            callback = function()
+                self.auto_refresh_on_startup = not (self.auto_refresh_on_startup == true)
+                self.auto_refresh_startup_pending = false
+                self:saveSettings()
+                self:configureAutomaticMetadataRefresh()
+            end,
+        },
+        {
+            text = _("Check interval"),
+            sub_item_table_func = function()
+                return self:getAutomaticMetadataRefreshIntervalMenu()
+            end,
+        },
+        {
+            text = _("Use OPDS updated timestamp as refresh trigger"),
+            checked_func = function()
+                return self.auto_refresh_use_opds_updated == true
+            end,
+            keep_menu_open = true,
+            callback = function()
+                self.auto_refresh_use_opds_updated = not (self.auto_refresh_use_opds_updated == true)
+                self:saveSettings()
+            end,
+        },
+        {
+            text = _("Automatic checks scan the library and contact Grimmory, which can use more battery. OPDS timestamps may refresh books after server-side changes that are not direct metadata edits."),
+            enabled = false,
+        },
+    }
+end
+
+function GrimmorySync:getAutomaticMetadataRefreshIntervalMenu()
+    local items = {}
+    for _, interval in ipairs(AUTO_REFRESH_INTERVAL_LIST) do
+        local hours = interval.hours
+        table.insert(items, {
+            text = interval.label,
+            checked_func = function()
+                return normalizeAutoRefreshInterval(self.auto_refresh_interval_hours) == hours
+            end,
+            keep_menu_open = true,
+            callback = function()
+                self.auto_refresh_interval_hours = hours
+                self:saveSettings()
+                self:configureAutomaticMetadataRefresh()
+            end,
+        })
+    end
+    return items
 end
 
 function GrimmorySync:routingProfileLabel(profile_id)
@@ -778,6 +974,7 @@ function GrimmorySync:showPathConfig()
                     callback = function()
                         self.local_path = input_dialog:getInputText()
                         self:saveSettings()
+                        self:configureAutomaticMetadataRefresh()
                         UIManager:close(input_dialog)
                         
                         UIManager:show(InfoMessage:new{
@@ -2067,6 +2264,32 @@ function GrimmorySync:remoteMetadataSignature(remote)
     return table.concat(self:metadataSignatureParts(remote), SIGNATURE_SEPARATOR)
 end
 
+function GrimmorySync:remoteOpdsTimestamp(remote)
+    return (remote and (remote.updated or remote.published)) or ""
+end
+
+function GrimmorySync:manifestOpdsTimestamp(manifest_entry)
+    return (manifest_entry and (manifest_entry.updated or manifest_entry.published)) or ""
+end
+
+function GrimmorySync:opdsTimestampRefreshState(manifest_entry, remote)
+    if self.auto_refresh_use_opds_updated ~= true then
+        return false, false
+    end
+
+    local current_timestamp = self:remoteOpdsTimestamp(remote)
+    if current_timestamp == "" then
+        return false, false
+    end
+
+    local previous_timestamp = self:manifestOpdsTimestamp(manifest_entry)
+    if previous_timestamp == "" then
+        return false, true
+    end
+
+    return previous_timestamp ~= current_timestamp, false
+end
+
 function GrimmorySync:splitMetadataSignature(signature)
     local parts = {}
     if type(signature) ~= "string" or signature == "" then
@@ -2157,6 +2380,18 @@ function GrimmorySync:migrateManifestSignature(manifest_entry, remote)
     manifest_entry.signature_migrated_at = os.time()
 end
 
+function GrimmorySync:updateManifestRemoteState(manifest_entry, remote)
+    if not manifest_entry then return end
+    manifest_entry.signature = self:remoteMetadataSignature(remote)
+    manifest_entry.updated = remote.updated
+    manifest_entry.published = remote.published
+    manifest_entry.download_url = remote.download_url
+    manifest_entry.title = remote.title
+    manifest_entry.author = remote.author
+    manifest_entry.hardcover_id = remote.hardcover_id
+    manifest_entry.hardcover_book_id = remote.hardcover_book_id
+end
+
 function GrimmorySync:getManifestEntry(manifest, path)
     local key = self:manifestKeyForPath(path)
     return manifest.books[key], key
@@ -2175,6 +2410,35 @@ function GrimmorySync:storeManifestEntry(manifest, path, remote)
         hardcover_book_id = remote.hardcover_book_id,
         refreshed_at = os.time(),
     }
+end
+
+function GrimmorySync:normalizePathForCompare(path)
+    if type(path) ~= "string" then
+        return ""
+    end
+    return path:gsub("\\", "/"):gsub("/+", "/")
+end
+
+function GrimmorySync:currentDocumentPath()
+    if self.ui and self.ui.document and self.ui.document.file then
+        return self.ui.document.file
+    end
+
+    local ok_reader, ReaderUI = pcall(require, "apps/reader/readerui")
+    if ok_reader and ReaderUI and ReaderUI.instance
+        and ReaderUI.instance.document and ReaderUI.instance.document.file then
+        return ReaderUI.instance.document.file
+    end
+
+    return nil
+end
+
+function GrimmorySync:isCurrentDocumentPath(path)
+    local current_path = self:currentDocumentPath()
+    if not current_path or not path then
+        return false
+    end
+    return self:normalizePathForCompare(current_path) == self:normalizePathForCompare(path)
 end
 
 function GrimmorySync:authorImagesPath()
@@ -2811,6 +3075,13 @@ function GrimmorySync:metadataRefreshMessage(stats, result, image_ok, image_resu
         result.skipped or 0
     )
 
+    if (result.skipped_open or 0) > 0 then
+        message = message .. string.format(
+            _("\nSkipped currently open: %d books"),
+            result.skipped_open or 0
+        )
+    end
+
     if image_result and image_result.enabled then
         if image_ok then
             message = message .. string.format(
@@ -2896,36 +3167,62 @@ function GrimmorySync:compareAndDownload(local_books, remote_books)
     return count, nil
 end
 
-function GrimmorySync:buildMetadataRefreshQueue(local_books, remote_books)
+function GrimmorySync:buildMetadataRefreshQueue(local_books, remote_books, options)
+    options = options or {}
     local local_index = self:buildLocalBookIndex(local_books)
     local manifest = self:loadManifest()
     local matched = {}
     local skipped = 0
     local manifest_changed = false
+    local queue_stats = {
+        skipped_open = 0,
+        metadata_changed = 0,
+        opds_timestamp_changed = 0,
+    }
 
     for _, remote in ipairs(remote_books) do
         local matched_book, matched_name, fuzzy = self:findLocalMatch(remote, local_index)
         if matched_book and matched_book.path then
-            local manifest_entry = self:getManifestEntry(manifest, matched_book.path)
-            local signature_matches, should_migrate = self:metadataSignatureMatches(manifest_entry, remote)
-            if signature_matches then
+            if options.skip_open_book and self:isCurrentDocumentPath(matched_book.path) then
                 skipped = skipped + 1
-                if should_migrate then
-                    self:migrateManifestSignature(manifest_entry, remote)
-                    manifest_changed = true
-                    logger.info("[GrimmorySync] Migrated stable metadata signature:", remote.title)
-                end
-                logger.info("[GrimmorySync] Metadata unchanged, skipping:", remote.title)
+                queue_stats.skipped_open = queue_stats.skipped_open + 1
+                logger.info("[GrimmorySync] Skipping currently open book:", remote.title)
             else
-                if fuzzy then
-                    logger.info("[GrimmorySync] Will refresh:", remote.title, "(fuzzy matched:", matched_name, ")")
+                local manifest_entry = self:getManifestEntry(manifest, matched_book.path)
+                local signature_matches, should_migrate = self:metadataSignatureMatches(manifest_entry, remote)
+                local timestamp_changed, should_store_timestamp = self:opdsTimestampRefreshState(manifest_entry, remote)
+
+                if signature_matches and not timestamp_changed then
+                    skipped = skipped + 1
+                    if should_migrate then
+                        self:migrateManifestSignature(manifest_entry, remote)
+                        manifest_changed = true
+                        logger.info("[GrimmorySync] Migrated stable metadata signature:", remote.title)
+                    elseif should_store_timestamp then
+                        self:updateManifestRemoteState(manifest_entry, remote)
+                        manifest_changed = true
+                        logger.info("[GrimmorySync] Stored OPDS timestamp baseline:", remote.title)
+                    end
+                    logger.info("[GrimmorySync] Metadata unchanged, skipping:", remote.title)
                 else
-                    logger.info("[GrimmorySync] Will refresh:", remote.title, "(matched:", matched_name, ")")
+                    local reason = (signature_matches and timestamp_changed) and "opds_timestamp" or "metadata"
+                    if reason == "opds_timestamp" then
+                        queue_stats.opds_timestamp_changed = queue_stats.opds_timestamp_changed + 1
+                        logger.info("[GrimmorySync] Will refresh:", remote.title, "(OPDS timestamp changed)")
+                    else
+                        queue_stats.metadata_changed = queue_stats.metadata_changed + 1
+                        if fuzzy then
+                            logger.info("[GrimmorySync] Will refresh:", remote.title, "(fuzzy matched:", matched_name, ")")
+                        else
+                            logger.info("[GrimmorySync] Will refresh:", remote.title, "(matched:", matched_name, ")")
+                        end
+                    end
+                    table.insert(matched, {
+                        remote = remote,
+                        local_path = matched_book.path,
+                        reason = reason,
+                    })
                 end
-                table.insert(matched, {
-                    remote = remote,
-                    local_path = matched_book.path,
-                })
             end
         end
     end
@@ -2934,7 +3231,7 @@ function GrimmorySync:buildMetadataRefreshQueue(local_books, remote_books)
         self:saveManifest(manifest)
     end
 
-    return matched, skipped, manifest
+    return matched, skipped, manifest, queue_stats
 end
 
 function GrimmorySync:refreshExistingMetadata(local_books, remote_books)
@@ -2971,10 +3268,12 @@ function GrimmorySync:refreshExistingMetadata(local_books, remote_books)
     return count, nil, skipped
 end
 
-function GrimmorySync:refreshExistingMetadataAsync(matched, skipped, manifest, done_callback)
+function GrimmorySync:refreshExistingMetadataAsync(matched, skipped, manifest, done_callback, options)
+    options = options or {}
     local total = #matched
     local count = 0
     local i = 0
+    local skipped_open = 0
     manifest = manifest or self:loadManifest()
 
     if total == 0 then
@@ -2994,6 +3293,7 @@ function GrimmorySync:refreshExistingMetadataAsync(matched, skipped, manifest, d
                 error = ABORTED,
                 refreshed = count,
                 skipped = skipped or 0,
+                skipped_open = skipped_open,
                 remaining = total - count,
             })
             return
@@ -3004,22 +3304,32 @@ function GrimmorySync:refreshExistingMetadataAsync(matched, skipped, manifest, d
             finish(true, {
                 refreshed = count,
                 skipped = skipped or 0,
+                skipped_open = skipped_open,
                 remaining = 0,
             })
             return
         end
 
         local item = matched[i]
-        self:showProgressDialog(string.format(
-            _("Refreshing metadata %d of %d...\n\n%s\n\nUpdated: %d\nSkipped unchanged: %d\n\nTap Cancel to stop after the current file."),
-            i,
-            total,
-            item.remote.title,
-            count,
-            skipped or 0
-        ))
+        if options.skip_open_book and self:isCurrentDocumentPath(item.local_path) then
+            skipped_open = skipped_open + 1
+            logger.info("[GrimmorySync] Skipping currently open book during refresh:", item.remote.title)
+            UIManager:scheduleIn(options.silent and 0.1 or PROGRESS_STEP_DELAY_S, step)
+            return
+        end
 
-        UIManager:scheduleIn(PROGRESS_STEP_DELAY_S, function()
+        if not options.silent then
+            self:showProgressDialog(string.format(
+                _("Refreshing metadata %d of %d...\n\n%s\n\nUpdated: %d\nSkipped unchanged: %d\n\nTap Cancel to stop after the current file."),
+                i,
+                total,
+                item.remote.title,
+                count,
+                skipped or 0
+            ))
+        end
+
+        UIManager:scheduleIn(options.silent and 0.1 or PROGRESS_STEP_DELAY_S, function()
             if self.abort_sync then
                 UIManager:scheduleIn(0, step)
                 return
@@ -3032,11 +3342,11 @@ function GrimmorySync:refreshExistingMetadataAsync(matched, skipped, manifest, d
                 self:saveManifest(manifest)
             end
 
-            UIManager:scheduleIn(PROGRESS_STEP_DELAY_S, step)
+            UIManager:scheduleIn(options.silent and 0.1 or PROGRESS_STEP_DELAY_S, step)
         end)
     end
 
-    UIManager:scheduleIn(PROGRESS_STEP_DELAY_S, step)
+    UIManager:scheduleIn(options.silent and 0.1 or PROGRESS_STEP_DELAY_S, step)
 end
 
 function GrimmorySync:buildCalibrePath(book)
@@ -3295,6 +3605,156 @@ function GrimmorySync:closeProgressDialog()
     end
 end
 
+function GrimmorySync:networkAvailableForAutomaticRefresh()
+    local ok_network, NetworkManager = pcall(require, "ui/network/manager")
+    if not ok_network or not NetworkManager or not NetworkManager.isConnected then
+        return true
+    end
+
+    local ok_connected, connected = pcall(function()
+        return NetworkManager:isConnected()
+    end)
+    if not ok_connected then
+        return true
+    end
+    return connected == true
+end
+
+function GrimmorySync:finishAutomaticMetadataRefresh(success, result)
+    result = result or {}
+    self.auto_refresh_running = false
+    self.auto_refresh_startup_pending = false
+    self.auto_refresh_last_check = os.time()
+    self:saveSettings()
+
+    if success then
+        logger.info("[GrimmorySync] Automatic metadata refresh complete:", result.refreshed or 0, "updated")
+        if (result.refreshed or 0) > 0 then
+            local text = string.format(
+                _("Automatic metadata refresh updated %d books."),
+                result.refreshed or 0
+            )
+            if (result.skipped_open or 0) > 0 then
+                text = text .. "\n" .. string.format(
+                    _("Skipped currently open: %d books"),
+                    result.skipped_open or 0
+                )
+            end
+            UIManager:show(InfoMessage:new{
+                text = text,
+                timeout = 4,
+            })
+        end
+    elseif result.error and result.error ~= "network_unavailable" and result.error ~= "busy" then
+        logger.warn("[GrimmorySync] Automatic metadata refresh failed:", result.error)
+        UIManager:show(InfoMessage:new{
+            text = string.format(_("Automatic metadata refresh failed: %s"), tostring(result.error)),
+            timeout = 5,
+        })
+    else
+        logger.info("[GrimmorySync] Automatic metadata refresh skipped:", result.error or "not due")
+    end
+
+    self:configureAutomaticMetadataRefresh()
+end
+
+function GrimmorySync:performAutomaticMetadataRefresh(reason)
+    if self.auto_refresh_running or self.sync_running then
+        logger.info("[GrimmorySync] Automatic metadata refresh skipped because sync is already running")
+        self:finishAutomaticMetadataRefresh(false, { error = "busy" })
+        return
+    end
+
+    if self.server_url == nil or self.server_url == "" then
+        self:finishAutomaticMetadataRefresh(false, { error = "server_not_configured" })
+        return
+    end
+
+    if not self:networkAvailableForAutomaticRefresh() then
+        self:finishAutomaticMetadataRefresh(false, { error = "network_unavailable" })
+        return
+    end
+
+    self.auto_refresh_running = true
+    self.abort_sync = false
+    self.abort_notified = false
+    logger.info("[GrimmorySync] Starting automatic metadata refresh:", reason or "timer")
+
+    local ok, success, payload = pcall(function()
+        local local_books = self:scanLocalBooks()
+        logger.info("[GrimmorySync] Automatic refresh local books:", #local_books)
+
+        local remote_books, err = self:fetchBooklistFromGrimmory()
+        if not remote_books then
+            return false, err
+        end
+
+        logger.info("[GrimmorySync] Automatic refresh remote books:", #remote_books)
+
+        local enriched, enrich_result = self:enrichRemoteBooksWithBookApiMetadata(remote_books)
+        if enriched then
+            logger.info("[GrimmorySync] Automatic refresh API metadata applied:", enrich_result)
+        else
+            logger.warn("[GrimmorySync] Automatic refresh continuing without Book API metadata:", enrich_result)
+        end
+
+        local matched, skipped, manifest, queue_stats = self:buildMetadataRefreshQueue(local_books, remote_books, {
+            skip_open_book = true,
+        })
+
+        return true, {
+            matched = matched,
+            manifest = manifest,
+            queue_stats = queue_stats,
+            skipped = skipped or 0,
+            local_count = #local_books,
+            remote_count = #remote_books,
+        }
+    end)
+
+    if not ok then
+        self:finishAutomaticMetadataRefresh(false, { error = success })
+        return
+    end
+
+    if not success then
+        self:finishAutomaticMetadataRefresh(false, { error = payload })
+        return
+    end
+
+    local stats = payload or {}
+    local matched = stats.matched or {}
+    local queue_stats = stats.queue_stats or {}
+
+    if #matched == 0 then
+        self:finishAutomaticMetadataRefresh(true, {
+            refreshed = 0,
+            skipped = stats.skipped or 0,
+            skipped_open = queue_stats.skipped_open or 0,
+        })
+        return
+    end
+
+    self:refreshExistingMetadataAsync(matched, stats.skipped or 0, stats.manifest, function(done_ok, result)
+        result = result or {}
+        result.skipped_open = (result.skipped_open or 0) + (queue_stats.skipped_open or 0)
+        if not done_ok then
+            self:finishAutomaticMetadataRefresh(false, {
+                error = result.error or _("unknown error"),
+                refreshed = result.refreshed or 0,
+                skipped = result.skipped or 0,
+                skipped_open = result.skipped_open or 0,
+            })
+            return
+        end
+
+        self:finishAutomaticMetadataRefresh(true, result)
+    end, {
+        silent = true,
+        skip_open_book = true,
+    })
+end
+
 -- Named entry point for SimpleUI's QuickAction scanner.
 -- Tapping the QuickAction tile opens the normal sync confirmation.
 function GrimmorySync:show()
@@ -3362,7 +3822,7 @@ function GrimmorySync:startMetadataRefresh()
 
     local confirm_dialog
     confirm_dialog = ConfirmBox:new{
-        text = _("Refresh metadata in existing books?\n\nThe plugin will download matched EPUB files again from Grimmory and replace local files only after the download has been verified. Missing books are not downloaded here."),
+        text = _("Refresh metadata in existing books?\n\nThe plugin will download matched EPUB files again from Grimmory and replace local files only after the download has been verified. Missing books are not downloaded here. The currently open book is skipped."),
         ok_text = _("Refresh"),
         cancel_text = _("Cancel"),
         ok_callback = function()
@@ -3376,6 +3836,14 @@ function GrimmorySync:startMetadataRefresh()
 end
 
 function GrimmorySync:performSync()
+    if self.sync_running or self.auto_refresh_running then
+        UIManager:show(InfoMessage:new{
+            text = _("Grimmory Sync is already running."),
+            timeout = 3,
+        })
+        return
+    end
+    self.sync_running = true
     self:showProgressDialog(_("Scanning local books..."))
     
     local ok, success, count_or_err = pcall(function()
@@ -3433,6 +3901,7 @@ function GrimmorySync:performSync()
             timeout = 5,
         })
         logger.err("[GrimmorySync] Sync error:", success)
+        self.sync_running = false
         return
     end
     
@@ -3444,6 +3913,7 @@ function GrimmorySync:performSync()
             })
             logger.err("[GrimmorySync] Error:", count_or_err)
         end
+        self.sync_running = false
         return
     end
     
@@ -3459,9 +3929,18 @@ function GrimmorySync:performSync()
         text = message,
         timeout = 5,
     })
+    self.sync_running = false
 end
 
 function GrimmorySync:performMetadataRefresh()
+    if self.sync_running or self.auto_refresh_running then
+        UIManager:show(InfoMessage:new{
+            text = _("Grimmory Sync is already running."),
+            timeout = 3,
+        })
+        return
+    end
+    self.sync_running = true
     self:showProgressDialog(_("Scanning local books..."))
 
     local ok, success, payload = pcall(function()
@@ -3507,11 +3986,14 @@ function GrimmorySync:performMetadataRefresh()
             #remote_books
         ))
 
-        local matched, skipped, manifest = self:buildMetadataRefreshQueue(local_books, remote_books)
+        local matched, skipped, manifest, queue_stats = self:buildMetadataRefreshQueue(local_books, remote_books, {
+            skip_open_book = true,
+        })
 
         return true, {
             matched = matched,
             manifest = manifest,
+            queue_stats = queue_stats,
             skipped = skipped or 0,
             local_count = #local_books,
             remote_count = #remote_books,
@@ -3527,6 +4009,7 @@ function GrimmorySync:performMetadataRefresh()
             timeout = 5,
         })
         logger.err("[GrimmorySync] Metadata refresh error:", success)
+        self.sync_running = false
         return
     end
 
@@ -3539,6 +4022,7 @@ function GrimmorySync:performMetadataRefresh()
             })
             logger.err("[GrimmorySync] Metadata refresh error:", payload)
         end
+        self.sync_running = false
         return
     end
 
@@ -3553,6 +4037,7 @@ function GrimmorySync:performMetadataRefresh()
                 text = self:metadataRefreshMessage(stats, result),
                 timeout = 5,
             })
+            self.sync_running = false
             return
         end
 
@@ -3562,6 +4047,7 @@ function GrimmorySync:performMetadataRefresh()
                 text = self:metadataRefreshMessage(stats, result, image_ok, image_result),
                 timeout = 5,
             })
+            self.sync_running = false
         end)
     end
 
@@ -3569,6 +4055,7 @@ function GrimmorySync:performMetadataRefresh()
         finishWithAuthorImages({
             refreshed = 0,
             skipped = stats.skipped or 0,
+            skipped_open = (stats.queue_stats and stats.queue_stats.skipped_open) or 0,
         })
         return
     end
@@ -3576,6 +4063,8 @@ function GrimmorySync:performMetadataRefresh()
     self:refreshExistingMetadataAsync(matched, stats.skipped or 0, stats.manifest, function(done_ok, result)
         self:closeProgressDialog()
         result = result or {}
+        result.skipped_open = (result.skipped_open or 0)
+            + ((stats.queue_stats and stats.queue_stats.skipped_open) or 0)
         if not done_ok then
             if result.error == ABORTED then
                 UIManager:show(InfoMessage:new{
@@ -3593,11 +4082,12 @@ function GrimmorySync:performMetadataRefresh()
                 })
                 logger.err("[GrimmorySync] Metadata refresh error:", result.error)
             end
+            self.sync_running = false
             return
         end
 
         finishWithAuthorImages(result)
-    end)
+    end, { skip_open_book = true })
 end
 
 function GrimmorySync:showStatus()
@@ -3605,8 +4095,17 @@ function GrimmorySync:showStatus()
     local sync_source = (self.selected_feed and self.selected_feed ~= "")
         and (self.selected_feed_label ~= "" and self.selected_feed_label or self.selected_feed)
         or _("All books")
+    local auto_refresh = {}
+    if self.auto_refresh_on_startup == true then
+        auto_refresh[#auto_refresh + 1] = _("startup")
+    end
+    local interval_label = self:autoRefreshIntervalLabel(self.auto_refresh_interval_hours)
+    if self:autoRefreshIntervalSeconds() > 0 then
+        auto_refresh[#auto_refresh + 1] = interval_label
+    end
+    local auto_refresh_text = #auto_refresh > 0 and table.concat(auto_refresh, ", ") or _("off")
     local text = string.format(
-        _("Server: %s\nUser: %s\nPath: %s\nLocal: %d books\nSync source: %s\nFolder profile: %s\nFile naming: %s\nCustom rules: %s\nBookshelf author images: %s\nBookshelf image path: %s"),
+        _("Server: %s\nUser: %s\nPath: %s\nLocal: %d books\nSync source: %s\nFolder profile: %s\nFile naming: %s\nCustom rules: %s\nAutomatic metadata refresh: %s\nOPDS timestamp trigger: %s\nBookshelf author images: %s\nBookshelf image path: %s"),
         self.server_url ~= "" and self.server_url or _("Not set"),
         self.username ~= "" and self.username or _("Not set"),
         self.local_path,
@@ -3615,6 +4114,8 @@ function GrimmorySync:showStatus()
         self:routingProfileLabel(self.routing_profile or ROUTING_PROFILE_FLAT),
         self:filenameProfileLabel(self.filename_profile or FILENAME_PROFILE_SYNC_DEFAULT),
         self.path_rules_file or DEFAULT_PATH_RULES_FILE,
+        auto_refresh_text,
+        self.auto_refresh_use_opds_updated == true and _("on") or _("off"),
         self.sync_author_images ~= false and _("on") or _("off"),
         self:authorImagesPath()
     )
