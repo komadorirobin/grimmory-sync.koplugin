@@ -3233,6 +3233,12 @@ function GrimmorySync:closeProgressDialog()
     end
 end
 
+-- Named entry point for SimpleUI's QuickAction scanner.
+-- Tapping the QuickAction tile triggers a sync directly from the homescreen.
+function GrimmorySync:show()
+    self:startSync()
+end
+
 function GrimmorySync:startSync()
     if self.server_url == "" then
         local config_dialog
