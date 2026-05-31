@@ -1776,7 +1776,12 @@ end
 
 function GrimmorySync:calibreTitleAuthorsFilename(book)
     book = book or {}
-    local safe_title = self:sanitizeFilenamePart(book.title)
+    return self:calibreTitleAuthorsFilenameForTitle(book, book.title)
+end
+
+function GrimmorySync:calibreTitleAuthorsFilenameForTitle(book, title)
+    book = book or {}
+    local safe_title = self:sanitizeFilenamePart(title)
     if not safe_title then return nil end
 
     local safe_author = self:sanitizeFilenamePart(book.author)
@@ -1784,6 +1789,35 @@ function GrimmorySync:calibreTitleAuthorsFilename(book)
         return string.format("%s - %s.epub", safe_title, safe_author)
     end
     return safe_title .. ".epub"
+end
+
+function GrimmorySync:articleSortedTitle(title)
+    title = trim(tostring(title or ""))
+    if title == "" then return nil end
+
+    local lower = title:lower()
+    local articles = {
+        { prefix = "the ", article = "The" },
+        { prefix = "an ", article = "An" },
+        { prefix = "a ", article = "A" },
+    }
+
+    for _, entry in ipairs(articles) do
+        if lower:sub(1, #entry.prefix) == entry.prefix then
+            local rest = trim(title:sub(#entry.prefix + 1))
+            if rest ~= "" then
+                return rest .. ", " .. entry.article
+            end
+        end
+    end
+
+    return nil
+end
+
+function GrimmorySync:calibreArticleSortedTitleAuthorsFilename(book)
+    local sorted_title = self:articleSortedTitle(book and book.title)
+    if not sorted_title then return nil end
+    return self:calibreTitleAuthorsFilenameForTitle(book, sorted_title)
 end
 
 function GrimmorySync:preferredDownloadFilename(book)
@@ -1819,6 +1853,7 @@ function GrimmorySync:generatePossibleFilenames(book)
     add(source_filename, true)
     add(self:syncDefaultFilename(book), false)
     add(self:calibreTitleAuthorsFilename(book), false)
+    add(self:calibreArticleSortedTitleAuthorsFilename(book), false)
 
     local safe_title = self:sanitizeFilenamePart(book and book.title)
     add(safe_title and (safe_title .. ".epub"), false)
@@ -1908,6 +1943,27 @@ function GrimmorySync:normalizeForComparison(str)
     return str
 end
 
+function GrimmorySync:comparisonKeyVariants(str)
+    local variants = {}
+    local seen = {}
+
+    local function add(value)
+        local normalized = self:normalizeForComparison(value)
+        if normalized ~= "" and not seen[normalized] then
+            seen[normalized] = true
+            variants[#variants + 1] = normalized
+        end
+    end
+
+    add(str)
+    if type(str) == "string" and str:match("_") then
+        add(str:gsub("_", " "))
+        add(str:gsub("_", ""))
+    end
+
+    return variants
+end
+
 function GrimmorySync:buildLocalBookIndex(local_books)
     local index = {
         lookup = {},
@@ -1920,8 +1976,12 @@ function GrimmorySync:buildLocalBookIndex(local_books)
         local filename = book.filename:match("([^/]+)$") or book.filename
         local normalized = self:normalizeForComparison(filename)
         local normalized_path = self:normalizeForComparison((book.filename or ""):gsub("\\", "/"))
-        index.lookup[normalized] = book
-        index.path_lookup[normalized_path] = book
+        for _, key in ipairs(self:comparisonKeyVariants(filename)) do
+            index.lookup[key] = book
+        end
+        for _, key in ipairs(self:comparisonKeyVariants((book.filename or ""):gsub("\\", "/"))) do
+            index.path_lookup[key] = book
+        end
         table.insert(index.files, {
             normalized = normalized,
             normalized_path = normalized_path,
@@ -1946,19 +2006,21 @@ function GrimmorySync:findLocalMatch(remote, local_index)
     end
 
     for _, path in ipairs(possible_paths) do
-        local normalized_path = self:normalizeForComparison(path)
-        local exact_path_match = local_index.path_lookup[normalized_path]
-        if exact_path_match then
-            return exact_path_match, path, false
+        for _, normalized_path in ipairs(self:comparisonKeyVariants(path)) do
+            local exact_path_match = local_index.path_lookup[normalized_path]
+            if exact_path_match then
+                return exact_path_match, path, false
+            end
         end
     end
 
     for _, name in ipairs(possible_names) do
         local normalized = self:normalizeForComparison(name)
-        local exact_match = local_index.lookup[normalized]
-
-        if exact_match then
-            return exact_match, name, false
+        for _, normalized_name in ipairs(self:comparisonKeyVariants(name)) do
+            local exact_match = local_index.lookup[normalized_name]
+            if exact_match then
+                return exact_match, name, false
+            end
         end
 
         -- Fuzzy match for title-only (when author is missing).

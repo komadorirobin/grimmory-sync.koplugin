@@ -73,7 +73,7 @@ The menu item `Download file naming` controls the filename used for newly downlo
 
 New installations default to `Grimmory file name`. Existing installations without a saved filename profile keep `Grimmory Sync default` to avoid silently changing an established local library layout.
 
-Duplicate detection is broader than the selected filename profile. Grimmory Sync checks Grimmory's original filename, the current default format, Calibre title-authors format, and title-only fallback names before deciding a book is missing.
+Duplicate detection is broader than the selected filename profile. Grimmory Sync checks Grimmory's original filename, the current default format, Calibre title-authors format, Calibre-style article sorting such as `Apollo Murders, The - Chris Hadfield.epub`, underscore variants, and title-only fallback names before deciding a book is missing.
 
 ### Sync Source
 
