@@ -111,6 +111,15 @@ This replaces matched local EPUB files with freshly downloaded copies from Grimm
 
 The currently open book is skipped during metadata refresh so KOReader is not reading from a file while Grimmory Sync replaces it. Close the book or open another book, then run refresh again if the skipped book also needs an update.
 
+### SimpleUI Quick Actions
+
+SimpleUI users can add Grimmory Sync shortcuts from SimpleUI's `System Actions` picker:
+
+- `Grimmory Sync: Sync missing books`
+- `Grimmory Sync: Refresh existing metadata`
+
+The older SimpleUI `Plugin` shortcut entry still opens `Sync missing books` for backwards compatibility.
+
 ### Automatic Metadata Refresh
 
 Automatic metadata refresh is off by default. Enable it from:

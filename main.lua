@@ -592,6 +592,7 @@ function GrimmorySync:init()
     if self.ui and self.ui.menu then
         self.ui.menu:registerToMainMenu(self)
     end
+    self:onDispatcherRegisterActions()
     
     local settings = self:loadSettings()
     self.server_url = settings.server_url
@@ -612,6 +613,26 @@ function GrimmorySync:init()
     self.auto_refresh_running = false
     self.sync_running = false
     self:configureAutomaticMetadataRefresh()
+end
+
+function GrimmorySync:onDispatcherRegisterActions()
+    local ok_dispatcher, Dispatcher = pcall(require, "dispatcher")
+    if not ok_dispatcher or not Dispatcher then
+        return
+    end
+
+    Dispatcher:registerAction("grimmory_sync_missing_books", {
+        category = "none",
+        event = "GrimmorySyncMissingBooks",
+        title = _("Grimmory Sync: Sync missing books"),
+        general = true,
+    })
+    Dispatcher:registerAction("grimmory_refresh_existing_metadata", {
+        category = "none",
+        event = "GrimmoryRefreshExistingMetadata",
+        title = _("Grimmory Sync: Refresh existing metadata"),
+        general = true,
+    })
 end
 
 function GrimmorySync:addToMainMenu(menu_items)
@@ -3758,8 +3779,18 @@ end
 -- Named entry point for SimpleUI's QuickAction scanner.
 -- Tapping the QuickAction tile opens the normal sync confirmation.
 function GrimmorySync:show()
+    self:onGrimmorySyncMissingBooks()
+end
+
+function GrimmorySync:onGrimmorySyncMissingBooks()
     self:runAfterMenuClose(function()
         self:startSync()
+    end)
+end
+
+function GrimmorySync:onGrimmoryRefreshExistingMetadata()
+    self:runAfterMenuClose(function()
+        self:startMetadataRefresh()
     end)
 end
 
