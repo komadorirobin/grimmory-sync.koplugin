@@ -48,7 +48,7 @@ Set:
 - `Password`, optional.
 - `Local book path`, for example `<library>/ePubs` or another folder where KOReader can read and write books.
 
-Credentials are stored locally in KOReader's storage as plain text because this plugin follows KOReader's simple plugin-settings style. Use it on a trusted device/network.
+Credentials are stored locally in KOReader's `settings/` folder as plain text because this plugin follows KOReader's simple plugin-settings style. Use it on a trusted device/network.
 
 ### Download Folder Profiles
 
@@ -192,7 +192,7 @@ Books are placed according to the selected download folder profile and named acc
 - OTA updates require a release asset named `grimmory-sync.koplugin.zip`.
 - Custom folder placement should live outside the plugin folder so OTA updates do not overwrite it.
 - KOReader must have network access to the Grimmory server.
-- Existing `booklore_sync_settings.txt` and `booklore_sync_history.lua` files are read as legacy fallbacks, but new saves use `grimmory_sync_*` files.
+- Plugin settings, download history, and metadata manifests are saved in KOReader's platform-specific `settings/` folder. Existing Android-root `grimmory_sync_*` files and old `booklore_sync_*` files are read as legacy fallbacks, but new saves use the KOReader settings folder.
 
 ## Troubleshooting
 

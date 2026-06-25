@@ -15,13 +15,74 @@ local GrimmorySync = WidgetContainer:new{
     abort_notified = false,
 }
 
-local SETTINGS_FILE = "/storage/emulated/0/koreader/grimmory_sync_settings.txt"
-local LEGACY_SETTINGS_FILE = "/storage/emulated/0/koreader/booklore_sync_settings.txt"
-local HISTORY_FILE = "/storage/emulated/0/koreader/grimmory_sync_history.lua"
-local LEGACY_HISTORY_FILE = "/storage/emulated/0/koreader/booklore_sync_history.lua"
-local MANIFEST_FILE = "/storage/emulated/0/koreader/grimmory_sync_manifest.lua"
-local DEFAULT_LOCAL_PATH = "/storage/emulated/0/ePubs"
-local DEFAULT_PATH_RULES_FILE = "/storage/emulated/0/koreader/grimmory_sync_path_rules.lua"
+local ANDROID_KOREADER_DIR = "/storage/emulated/0/koreader"
+local ANDROID_LIBRARY_DIR = "/storage/emulated/0/ePubs"
+
+local function isAndroid()
+    return pcall(require, "android")
+end
+
+local function dataStoragePath(method_name, fallback)
+    local ok_datastorage, datastorage = pcall(require, "datastorage")
+    if ok_datastorage and datastorage and type(datastorage[method_name]) == "function" then
+        local ok_path, path = pcall(datastorage[method_name], datastorage)
+        if ok_path and type(path) == "string" and path ~= "" then
+            return path:gsub("/+$", "")
+        end
+    end
+    return fallback:gsub("/+$", "")
+end
+
+local DATA_DIR = dataStoragePath("getFullDataDir", dataStoragePath("getDataDir", ANDROID_KOREADER_DIR))
+local SETTINGS_DIR = dataStoragePath("getSettingsDir", ANDROID_KOREADER_DIR)
+
+local function dataPath(filename)
+    return DATA_DIR .. "/" .. filename
+end
+
+local function settingsPath(filename)
+    return SETTINGS_DIR .. "/" .. filename
+end
+
+local function androidLegacyPath(filename)
+    return ANDROID_KOREADER_DIR .. "/" .. filename
+end
+
+local function openFirstReadable(paths)
+    local seen = {}
+    for _, path in ipairs(paths) do
+        if path and not seen[path] then
+            seen[path] = true
+            local file = io.open(path, "r")
+            if file then
+                return file, path
+            end
+        end
+    end
+    return nil, nil
+end
+
+local SETTINGS_FILE = settingsPath("grimmory_sync_settings.txt")
+local SETTINGS_READ_FILES = {
+    SETTINGS_FILE,
+    androidLegacyPath("grimmory_sync_settings.txt"),
+    settingsPath("booklore_sync_settings.txt"),
+    androidLegacyPath("booklore_sync_settings.txt"),
+}
+local HISTORY_FILE = settingsPath("grimmory_sync_history.lua")
+local HISTORY_READ_FILES = {
+    HISTORY_FILE,
+    androidLegacyPath("grimmory_sync_history.lua"),
+    settingsPath("booklore_sync_history.lua"),
+    androidLegacyPath("booklore_sync_history.lua"),
+}
+local MANIFEST_FILE = settingsPath("grimmory_sync_manifest.lua")
+local MANIFEST_READ_FILES = {
+    MANIFEST_FILE,
+    androidLegacyPath("grimmory_sync_manifest.lua"),
+}
+local DEFAULT_LOCAL_PATH = isAndroid() and ANDROID_LIBRARY_DIR or DATA_DIR
+local DEFAULT_PATH_RULES_FILE = dataPath("grimmory_sync_path_rules.lua")
 local MAX_HISTORY = 15
 local PROGRESS_STEP_DELAY_S = 0.2
 local AUTHOR_IMAGE_EXTS = { "jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "tif" }
@@ -315,7 +376,7 @@ local function parseBookMetadataFallback(body)
 end
 
 function GrimmorySync:loadSettings()
-    local file = io.open(SETTINGS_FILE, "r") or io.open(LEGACY_SETTINGS_FILE, "r")
+    local file, settings_path = openFirstReadable(SETTINGS_READ_FILES)
     if not file then
         return {
             server_url = "",
@@ -332,6 +393,7 @@ function GrimmorySync:loadSettings()
             auto_refresh_interval_hours = 0,
             auto_refresh_use_opds_updated = false,
             auto_refresh_last_check = 0,
+            settings_source_path = nil,
         }
     end
     
@@ -375,14 +437,15 @@ function GrimmorySync:loadSettings()
         auto_refresh_interval_hours = normalizeAutoRefreshInterval(settings.auto_refresh_interval_hours),
         auto_refresh_use_opds_updated = settingToBool(settings.auto_refresh_use_opds_updated, false),
         auto_refresh_last_check = settingToNumber(settings.auto_refresh_last_check, 0),
+        settings_source_path = settings_path,
     }
 end
 
 function GrimmorySync:saveSettings()
     local file = io.open(SETTINGS_FILE, "w")
     if not file then
-        logger.warn("[GrimmorySync] Cannot save settings")
-        return
+        logger.warn("[GrimmorySync] Cannot save settings:", SETTINGS_FILE)
+        return false
     end
     
     file:write("server_url=" .. self.server_url .. "\n")
@@ -400,17 +463,15 @@ function GrimmorySync:saveSettings()
     file:write("auto_refresh_use_opds_updated=" .. boolToSetting(self.auto_refresh_use_opds_updated == true) .. "\n")
     file:write("auto_refresh_last_check=" .. tostring(self.auto_refresh_last_check or 0) .. "\n")
     file:close()
+    return true
 end
 
 function GrimmorySync:loadHistory()
-    local ok, history = pcall(dofile, HISTORY_FILE)
-    if ok and type(history) == "table" then
-        return history
-    end
-
-    ok, history = pcall(dofile, LEGACY_HISTORY_FILE)
-    if ok and type(history) == "table" then
-        return history
+    for _, path in ipairs(HISTORY_READ_FILES) do
+        local ok, history = pcall(dofile, path)
+        if ok and type(history) == "table" then
+            return history
+        end
     end
 
     return {}
@@ -419,7 +480,7 @@ end
 function GrimmorySync:saveHistory(history)
     local file = io.open(HISTORY_FILE, "w")
     if not file then
-        logger.warn("[GrimmorySync] Cannot save history")
+        logger.warn("[GrimmorySync] Cannot save history:", HISTORY_FILE)
         return
     end
     file:write("return " .. dump(history) .. "\n")
@@ -427,10 +488,12 @@ function GrimmorySync:saveHistory(history)
 end
 
 function GrimmorySync:loadManifest()
-    local ok, manifest = pcall(dofile, MANIFEST_FILE)
-    if ok and type(manifest) == "table" then
-        manifest.books = type(manifest.books) == "table" and manifest.books or {}
-        return manifest
+    for _, path in ipairs(MANIFEST_READ_FILES) do
+        local ok, manifest = pcall(dofile, path)
+        if ok and type(manifest) == "table" then
+            manifest.books = type(manifest.books) == "table" and manifest.books or {}
+            return manifest
+        end
     end
 
     return {
@@ -442,7 +505,7 @@ end
 function GrimmorySync:saveManifest(manifest)
     local file = io.open(MANIFEST_FILE, "w")
     if not file then
-        logger.warn("[GrimmorySync] Cannot save manifest")
+        logger.warn("[GrimmorySync] Cannot save manifest:", MANIFEST_FILE)
         return false
     end
 
@@ -674,6 +737,9 @@ function GrimmorySync:init()
     self.auto_refresh_startup_pending = self.auto_refresh_on_startup == true
     self.auto_refresh_running = false
     self.sync_running = false
+    if settings.settings_source_path and settings.settings_source_path ~= SETTINGS_FILE then
+        self:saveSettings()
+    end
     self:configureAutomaticMetadataRefresh()
 end
 
@@ -2708,7 +2774,7 @@ function GrimmorySync:refreshFileBrowserContent()
 end
 
 function GrimmorySync:authorImagesPath()
-    return (self.local_path or "/storage/emulated/0/ePubs"):gsub("/+$", "")
+    return (self.local_path or DEFAULT_LOCAL_PATH):gsub("/+$", "")
         .. "/.bookshelf-images/authors"
 end
 
