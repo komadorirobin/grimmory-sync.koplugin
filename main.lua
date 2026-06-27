@@ -2,11 +2,13 @@ local UIManager = require("ui/uimanager")
 local InfoMessage = require("ui/widget/infomessage")
 local ConfirmBox = require("ui/widget/confirmbox")
 local InputDialog = require("ui/widget/inputdialog")
+local ButtonDialog = require("ui/widget/buttondialog")
 local WidgetContainer = require("ui/widget/container/widgetcontainer")
 local logger = require("logger")
 local _ = require("gettext")
 local dump = require("dump")
 local Updater = require("grimmory_updater")
+local Providers = require("providers/init")
 
 local GrimmorySync = WidgetContainer:new{
     name = "grimmorysync",
@@ -88,6 +90,8 @@ local PROGRESS_STEP_DELAY_S = 0.2
 local AUTHOR_IMAGE_EXTS = { "jpg", "jpeg", "png", "gif", "bmp", "webp", "tiff", "tif" }
 local SIGNATURE_SEPARATOR = "\31"
 local ABORTED = "aborted"
+local SERVER_GRIMMORY = "grimmory"
+local SERVER_BOOKORBIT = "bookorbit"
 local ROUTING_PROFILE_FLAT = "flat"
 local ROUTING_PROFILE_AUTHOR = "author"
 local ROUTING_PROFILE_GENRE_SERIES = "genre_series"
@@ -105,8 +109,8 @@ local ROUTING_PROFILE_LIST = {
     { id = ROUTING_PROFILE_SWEDISH_EXAMPLE, label = _("Swedish genre example") },
 }
 local FILENAME_PROFILE_LIST = {
-    { id = FILENAME_PROFILE_GRIMMORY, label = _("Grimmory file name") },
-    { id = FILENAME_PROFILE_SYNC_DEFAULT, label = _("Grimmory Sync default") },
+    { id = FILENAME_PROFILE_GRIMMORY, label = _("Server file name") },
+    { id = FILENAME_PROFILE_SYNC_DEFAULT, label = _("Library Sync default") },
     { id = FILENAME_PROFILE_CALIBRE_TITLE_AUTHORS, label = _("Calibre title-authors") },
 }
 local AUTO_REFRESH_INTERVAL_LIST = {
@@ -379,9 +383,12 @@ function GrimmorySync:loadSettings()
     local file, settings_path = openFirstReadable(SETTINGS_READ_FILES)
     if not file then
         return {
+            server_type = "",
             server_url = "",
             username = "",
             password = "",
+            api_username = "",
+            api_password = "",
             local_path = DEFAULT_LOCAL_PATH,
             sync_author_images = false,
             routing_profile = ROUTING_PROFILE_FLAT,
@@ -394,6 +401,7 @@ function GrimmorySync:loadSettings()
             auto_refresh_use_opds_updated = false,
             auto_refresh_last_check = 0,
             settings_source_path = nil,
+            settings_needs_migration = false,
         }
     end
     
@@ -421,11 +429,21 @@ function GrimmorySync:loadSettings()
     elseif not isFilenameProfile(filename_profile) then
         filename_profile = FILENAME_PROFILE_SYNC_DEFAULT
     end
+
+    local server_type = settings.server_type
+    local settings_needs_migration = not Providers.isValid(server_type)
+    if settings_needs_migration then
+        -- Settings written before multi-server support always belong to Grimmory.
+        server_type = SERVER_GRIMMORY
+    end
     
     return {
+        server_type = server_type,
         server_url = settings.server_url or "",
         username = settings.username or "",
         password = settings.password or "",
+        api_username = settings.api_username or "",
+        api_password = settings.api_password or "",
         local_path = settings.local_path or DEFAULT_LOCAL_PATH,
         sync_author_images = settingToBool(settings.sync_author_images, true),
         routing_profile = routing_profile,
@@ -438,6 +456,7 @@ function GrimmorySync:loadSettings()
         auto_refresh_use_opds_updated = settingToBool(settings.auto_refresh_use_opds_updated, false),
         auto_refresh_last_check = settingToNumber(settings.auto_refresh_last_check, 0),
         settings_source_path = settings_path,
+        settings_needs_migration = settings_needs_migration,
     }
 end
 
@@ -448,9 +467,12 @@ function GrimmorySync:saveSettings()
         return false
     end
     
+    file:write("server_type=" .. (self.server_type or SERVER_GRIMMORY) .. "\n")
     file:write("server_url=" .. self.server_url .. "\n")
     file:write("username=" .. self.username .. "\n")
     file:write("password=" .. self.password .. "\n")
+    file:write("api_username=" .. (self.api_username or "") .. "\n")
+    file:write("api_password=" .. (self.api_password or "") .. "\n")
     file:write("local_path=" .. self.local_path .. "\n")
     file:write("sync_author_images=" .. boolToSetting(self.sync_author_images ~= false) .. "\n")
     file:write("routing_profile=" .. (self.routing_profile or ROUTING_PROFILE_FLAT) .. "\n")
@@ -647,8 +669,7 @@ end
 
 function GrimmorySync:automaticMetadataRefreshEnabled()
     return (self.auto_refresh_on_startup == true or self:autoRefreshIntervalSeconds() > 0)
-        and self.server_url ~= nil
-        and self.server_url ~= ""
+        and self:configurationReady()
 end
 
 function GrimmorySync:cancelAutomaticMetadataRefreshTimer()
@@ -720,9 +741,12 @@ function GrimmorySync:init()
     self:registerFileDialogButtons()
     
     local settings = self:loadSettings()
+    self.server_type = settings.server_type
     self.server_url = settings.server_url
     self.username = settings.username
     self.password = settings.password
+    self.api_username = settings.api_username or ""
+    self.api_password = settings.api_password or ""
     self.local_path = settings.local_path
     self.sync_author_images = settings.sync_author_images ~= false
     self.routing_profile = settings.routing_profile
@@ -737,10 +761,49 @@ function GrimmorySync:init()
     self.auto_refresh_startup_pending = self.auto_refresh_on_startup == true
     self.auto_refresh_running = false
     self.sync_running = false
-    if settings.settings_source_path and settings.settings_source_path ~= SETTINGS_FILE then
+    if settings.settings_needs_migration
+        or (settings.settings_source_path and settings.settings_source_path ~= SETTINGS_FILE) then
         self:saveSettings()
     end
     self:configureAutomaticMetadataRefresh()
+end
+
+function GrimmorySync:provider()
+    return Providers.get(self.server_type)
+end
+
+function GrimmorySync:serverName()
+    if not Providers.isValid(self.server_type) then
+        return _("Not set")
+    end
+    return self:provider().name
+end
+
+function GrimmorySync:apiCredentials()
+    local provider = self:provider()
+    if provider.api_credentials_separate then
+        return trim(self.api_username or ""), trim(self.api_password or "")
+    end
+    return trim(self.username or ""), trim(self.password or "")
+end
+
+function GrimmorySync:configurationReady()
+    return Providers.isValid(self.server_type) and trim(self.server_url or "") ~= ""
+end
+
+function GrimmorySync:promptConfiguration()
+    local config_dialog
+    config_dialog = ConfirmBox:new{
+        text = _("Server not configured!\n\nConfigure now?"),
+        ok_text = _("Configure"),
+        ok_callback = function()
+            pcall(function() UIManager:close(config_dialog) end)
+            UIManager:scheduleIn(0, function()
+                self:showServerTypeConfig()
+            end)
+        end,
+    }
+    UIManager:show(config_dialog)
 end
 
 function GrimmorySync:onDispatcherRegisterActions()
@@ -752,19 +815,19 @@ function GrimmorySync:onDispatcherRegisterActions()
     Dispatcher:registerAction("grimmory_sync_missing_books", {
         category = "none",
         event = "GrimmorySyncMissingBooks",
-        title = _("Grimmory Sync: Sync missing books"),
+        title = _("Library Sync: Sync missing books"),
         general = true,
     })
     Dispatcher:registerAction("grimmory_refresh_existing_metadata", {
         category = "none",
         event = "GrimmoryRefreshExistingMetadata",
-        title = _("Grimmory Sync: Refresh existing metadata"),
+        title = _("Library Sync: Refresh existing metadata"),
         general = true,
     })
     Dispatcher:registerAction("grimmory_refresh_open_book_metadata", {
         category = "none",
         event = "GrimmoryRefreshOpenBookMetadata",
-        title = _("Grimmory Sync: Refresh open book metadata"),
+        title = _("Library Sync: Refresh open book metadata"),
         general = true,
     })
 end
@@ -782,7 +845,7 @@ function GrimmorySync:registerFileDialogButtons()
 
         return {
             {
-                text = _("Refresh Grimmory metadata"),
+                text = _("Refresh server metadata"),
                 callback = function()
                     local file_chooser = FileManager.instance and FileManager.instance.file_chooser
                     if file_chooser and file_chooser.file_dialog then
@@ -797,7 +860,7 @@ end
 
 function GrimmorySync:addToMainMenu(menu_items)
     menu_items.grimmory_sync = {
-        text = _("Grimmory Sync"),
+        text = _("Library Sync"),
         sorting_hint = "search",
         sub_item_table = {
             {
@@ -869,12 +932,12 @@ function GrimmorySync:addToMainMenu(menu_items)
                 text = _("Configure"),
                 callback = function(touchmenu_instance)
                     self:runAfterMenuClose(touchmenu_instance, function()
-                        self:showServerConfig()
+                        self:showServerTypeConfig()
                     end)
                 end,
             },
             {
-                text = _("Select shelf to sync"),
+                text = _("Select sync source"),
                 sub_item_table_func = function()
                     return self:getShelfSelectionMenu()
                 end,
@@ -902,10 +965,17 @@ function GrimmorySync:getBookshelfIntegrationMenu()
             callback = function()
                 self.sync_author_images = not (self.sync_author_images ~= false)
                 self:saveSettings()
+                local message = self.sync_author_images
+                    and _("Bookshelf author image sync enabled")
+                    or _("Bookshelf author image sync disabled")
+                if self.sync_author_images and self:provider().api_credentials_separate then
+                    local api_username, api_password = self:apiCredentials()
+                    if api_username == "" or api_password == "" then
+                        message = _("Bookshelf author image sync enabled. BookOrbit account credentials are required under Configure.")
+                    end
+                end
                 UIManager:show(InfoMessage:new{
-                    text = self.sync_author_images
-                        and _("Bookshelf author image sync enabled")
-                        or _("Bookshelf author image sync disabled"),
+                    text = message,
                     timeout = 2,
                 })
             end,
@@ -957,7 +1027,7 @@ function GrimmorySync:getAutomaticMetadataRefreshMenu()
             end,
         },
         {
-            text = _("Automatic checks scan the library and contact Grimmory, which can use more battery. OPDS timestamps may refresh books after server-side changes that are not direct metadata edits."),
+            text = _("Automatic checks scan the library and contact the server, which can use more battery. OPDS timestamps may refresh books after server-side changes that are not direct metadata edits."),
             enabled = false,
         },
     }
@@ -1054,19 +1124,63 @@ function GrimmorySync:getFilenameProfileMenu()
     return items
 end
 
+function GrimmorySync:showServerTypeConfig()
+    local dialog
+    local function selectServer(server_type)
+        local changed = self.server_type ~= server_type
+        self.server_type = server_type
+        if changed then
+            self.selected_feed = ""
+            self.selected_feed_label = ""
+        end
+        UIManager:close(dialog)
+        self:showServerConfig()
+    end
+
+    dialog = ButtonDialog:new{
+        title = _("Library server"),
+        buttons = {
+            {
+                {
+                    text = "Grimmory",
+                    callback = function()
+                        selectServer(SERVER_GRIMMORY)
+                    end,
+                },
+                {
+                    text = "BookOrbit",
+                    callback = function()
+                        selectServer(SERVER_BOOKORBIT)
+                    end,
+                },
+            },
+            {
+                {
+                    text = _("Cancel"),
+                    callback = function()
+                        UIManager:close(dialog)
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(dialog)
+end
+
 function GrimmorySync:showServerConfig()
     local input_dialog
     input_dialog = InputDialog:new{
-        title = _("Grimmory Server URL"),
+        title = string.format(_("%s server URL"), self:serverName()),
         input = self.server_url,
         input_hint = "http://192.168.1.100:6060",
         input_type = "text",
         buttons = {
             {
                 {
-                    text = _("Cancel"),
+                    text = _("Back"),
                     callback = function()
                         UIManager:close(input_dialog)
+                        self:showServerTypeConfig()
                     end,
                 },
                 {
@@ -1085,9 +1199,13 @@ function GrimmorySync:showServerConfig()
 end
 
 function GrimmorySync:showUsernameConfig()
+    local title = _("Username (optional)")
+    if self.server_type == SERVER_BOOKORBIT then
+        title = _("OPDS username")
+    end
     local input_dialog
     input_dialog = InputDialog:new{
-        title = _("Username (optional)"),
+        title = title,
         input = self.username,
         input_type = "text",
         buttons = {
@@ -1115,9 +1233,13 @@ function GrimmorySync:showUsernameConfig()
 end
 
 function GrimmorySync:showPasswordConfig()
+    local title = _("Password (optional)")
+    if self.server_type == SERVER_BOOKORBIT then
+        title = _("OPDS password")
+    end
     local input_dialog
     input_dialog = InputDialog:new{
-        title = _("Password (optional)"),
+        title = title,
         input = self.password,
         input_type = "text",
         text_type = "password",
@@ -1134,6 +1256,72 @@ function GrimmorySync:showPasswordConfig()
                     text = _("Next"),
                     callback = function()
                         self.password = input_dialog:getInputText()
+                        UIManager:close(input_dialog)
+                        if self:provider().api_credentials_separate then
+                            self:showApiUsernameConfig()
+                        else
+                            self:showPathConfig()
+                        end
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(input_dialog)
+    input_dialog:onShowKeyboard()
+end
+
+function GrimmorySync:showApiUsernameConfig()
+    local input_dialog
+    input_dialog = InputDialog:new{
+        title = _("BookOrbit account username (optional)"),
+        input = self.api_username or "",
+        input_type = "text",
+        description = _("Used only for extra metadata and Bookshelf author images. OPDS syncing works without it."),
+        buttons = {
+            {
+                {
+                    text = _("Back"),
+                    callback = function()
+                        UIManager:close(input_dialog)
+                        self:showPasswordConfig()
+                    end,
+                },
+                {
+                    text = _("Next"),
+                    callback = function()
+                        self.api_username = input_dialog:getInputText()
+                        UIManager:close(input_dialog)
+                        self:showApiPasswordConfig()
+                    end,
+                },
+            },
+        },
+    }
+    UIManager:show(input_dialog)
+    input_dialog:onShowKeyboard()
+end
+
+function GrimmorySync:showApiPasswordConfig()
+    local input_dialog
+    input_dialog = InputDialog:new{
+        title = _("BookOrbit account password (optional)"),
+        input = self.api_password or "",
+        input_type = "text",
+        text_type = "password",
+        buttons = {
+            {
+                {
+                    text = _("Back"),
+                    callback = function()
+                        UIManager:close(input_dialog)
+                        self:showApiUsernameConfig()
+                    end,
+                },
+                {
+                    text = _("Next"),
+                    callback = function()
+                        self.api_password = input_dialog:getInputText()
                         UIManager:close(input_dialog)
                         self:showPathConfig()
                     end,
@@ -1158,7 +1346,11 @@ function GrimmorySync:showPathConfig()
                     text = _("Back"),
                     callback = function()
                         UIManager:close(input_dialog)
-                        self:showPasswordConfig()
+                        if self:provider().api_credentials_separate then
+                            self:showApiPasswordConfig()
+                        else
+                            self:showPasswordConfig()
+                        end
                     end,
                 },
                 {
@@ -1272,6 +1464,9 @@ function GrimmorySync:buildServerUrl(endpoint)
     end
 
     local base = trim(self.server_url):gsub("/+$", "")
+    -- Accept the OPDS endpoint BookOrbit displays as well as the server origin.
+    base = base:gsub("/api/v1/opds.*$", "")
+    base = base:gsub("/api/v1$", "")
     endpoint = tostring(endpoint or "")
     if endpoint:sub(1, 1) ~= "/" then
         endpoint = "/" .. endpoint
@@ -1432,6 +1627,10 @@ function GrimmorySync:isLikelyBookDownloadLink(link)
         return true, "epub"
     end
 
+    if type_lower ~= "" and not type_lower:match("octet%-stream") then
+        return false, "unsupported publication type: " .. type_lower
+    end
+
     if href_lower:match("/download") or href_lower:match("[?&]fileid=") or href_lower:match("[?&]bookid=") then
         return true, "download-url"
     end
@@ -1541,13 +1740,18 @@ function GrimmorySync:fileNameFromOpdsLink(link)
     return nil
 end
 
-function GrimmorySync:fetchShelves()
-    -- Fetch the navigation feeds that contain acquisition sub-feeds we can sync.
-    -- Aggregates personal shelves and magic (dynamic) shelves into one list.
-    local sources = {
-        { endpoint = "/api/v1/opds/shelves", prefix = "" },
-        { endpoint = "/api/v1/opds/magic-shelves", prefix = _("[Magic] ") },
+function GrimmorySync:syncSourcePrefix(kind)
+    local labels = {
+        magic = _("[Magic] "),
+        library = _("[Library] "),
+        collection = _("[Collection] "),
+        smartscope = _("[SmartScope] "),
     }
+    return labels[kind] or ""
+end
+
+function GrimmorySync:fetchSyncSources()
+    local sources = self:provider().sync_sources or {}
     local shelves = {}
     local any_ok = false
     local last_err
@@ -1585,7 +1789,10 @@ function GrimmorySync:fetchShelves()
                         :gsub("&gt;", ">")
                 end
                 if title and href then
-                    shelves[#shelves + 1] = { label = source.prefix .. title, href = href }
+                    shelves[#shelves + 1] = {
+                        label = self:syncSourcePrefix(source.kind) .. title,
+                        href = href,
+                    }
                 end
             end
         else
@@ -1593,7 +1800,7 @@ function GrimmorySync:fetchShelves()
         end
     end
     if not any_ok then
-        return nil, last_err or _("Could not load shelves")
+        return nil, last_err or _("Could not load sync sources")
     end
     return shelves, nil
 end
@@ -1615,10 +1822,10 @@ function GrimmorySync:getShelfSelectionMenu()
         { text = "———", enabled = false },
     }
 
-    local shelves, err = self:fetchShelves()
+    local shelves, err = self:fetchSyncSources()
     if not shelves then
         items[#items + 1] = {
-            text = string.format(_("Could not load shelves: %s"), tostring(err)),
+            text = string.format(_("Could not load sync sources: %s"), tostring(err)),
             enabled = false,
         }
         return items
@@ -1626,7 +1833,7 @@ function GrimmorySync:getShelfSelectionMenu()
 
     if #shelves == 0 then
         items[#items + 1] = {
-            text = _("No shelves found on server"),
+            text = _("No sync sources found on server"),
             enabled = false,
         }
         return items
@@ -1652,12 +1859,40 @@ function GrimmorySync:getShelfSelectionMenu()
     return items
 end
 
-function GrimmorySync:fetchBooklistFromGrimmory()
+function GrimmorySync:seriesFromOpdsEntry(entry)
+    local series = xmlText(entry:match('<meta[^>]*property="belongs%-to%-collection"[^>]*id="series"[^>]*>([^<]+)</meta>'))
+    local series_index = xmlText(entry:match('<meta[^>]*property="group%-position"[^>]*refines="#series"[^>]*>([^<]+)</meta>'))
+
+    if not series then
+        series = xmlDecode(entry:match('<meta[^>]*name="calibre:series"[^>]*content="([^"]+)"'))
+    end
+    if not series_index then
+        series_index = xmlDecode(entry:match('<meta[^>]*name="calibre:series_index"[^>]*content="([^"]+)"'))
+    end
+
+    if not series then
+        for _, link in ipairs(self:opdsLinks(entry)) do
+            if tostring(link.rel or ""):match("sort/series") then
+                local title = trim(link.title or "")
+                if title ~= "" then
+                    local name, index = title:match("^(.-)%s+#([%d%.]+)$")
+                    series = trim(name or title)
+                    series_index = series_index or index
+                    break
+                end
+            end
+        end
+    end
+
+    return series, series_index
+end
+
+function GrimmorySync:fetchBooklistFromServer()
     logger.info("[GrimmorySync] Fetching books from:", self.server_url)
     logger.info("[GrimmorySync] Username:", self.username)
     
     -- First, get the root OPDS catalog to find the "All Books" link
-    local root_response, err = self:makeRequest("/api/v1/opds")
+    local root_response, err = self:makeRequest(self:provider().opds_root)
     
     -- If 401, try without authentication
     if err and err:match("401") then
@@ -1751,18 +1986,7 @@ function GrimmorySync:fetchBooklistFromGrimmory()
                 table.insert(genres, category)
             end
             
-            -- Extract series and series index
-            -- First try OPDS standard (belongs-to-collection)
-            local series = xmlText(entry:match('<meta[^>]*property="belongs%-to%-collection"[^>]*id="series"[^>]*>([^<]+)</meta>'))
-            local series_index = xmlText(entry:match('<meta[^>]*property="group%-position"[^>]*refines="#series"[^>]*>([^<]+)</meta>'))
-            
-            -- Fallback to Calibre compatibility format
-            if not series then
-                series = xmlDecode(entry:match('<meta[^>]*name="calibre:series"[^>]*content="([^"]+)"'))
-            end
-            if not series_index then
-                series_index = xmlDecode(entry:match('<meta[^>]*name="calibre:series_index"[^>]*content="([^"]+)"'))
-            end
+            local series, series_index = self:seriesFromOpdsEntry(entry)
             
             -- Extract updated/published timestamp. Grimmory metadata rewrites
             -- should change one of these; the full value is kept for refresh
@@ -2303,6 +2527,10 @@ function GrimmorySync:preferredDownloadFilename(book)
 
     if profile == FILENAME_PROFILE_GRIMMORY then
         filename = self:sanitizeFilename(self:grimmorySourceFilename(book))
+        if not filename and self.server_type == SERVER_BOOKORBIT then
+            -- BookOrbit's OPDS download name is Title - Author, not the source path.
+            filename = self:calibreTitleAuthorsFilename(book)
+        end
     elseif profile == FILENAME_PROFILE_CALIBRE_TITLE_AUTHORS then
         filename = self:calibreTitleAuthorsFilename(book)
     end
@@ -2534,6 +2762,7 @@ function GrimmorySync:metadataSignatureParts(remote)
 
     parts[#parts + 1] = remote.hardcover_id or ""
     parts[#parts + 1] = remote.hardcover_book_id or ""
+    parts[#parts + 1] = remote.hardcover_edition_id or ""
     parts[#parts + 1] = remote.description or ""
     parts[#parts + 1] = table.concat(genres, "|")
 
@@ -2603,6 +2832,7 @@ function GrimmorySync:stableSignatureFromLegacy(signature)
         parts[7] or "",
         "",
         "",
+        "",
         parts[9] or "",
         parts[10] or "",
     }, SIGNATURE_SEPARATOR)
@@ -2621,8 +2851,28 @@ function GrimmorySync:stableSignatureFromPreviousStable(signature)
         parts[4] or "",
         "",
         "",
+        "",
         parts[5] or "",
         parts[6] or "",
+    }, SIGNATURE_SEPARATOR)
+end
+
+function GrimmorySync:stableSignatureWithEditionFromPriorCurrent(signature)
+    local parts = self:splitMetadataSignature(signature)
+    if #parts ~= 8 then
+        return nil
+    end
+
+    return table.concat({
+        parts[1] or "",
+        parts[2] or "",
+        parts[3] or "",
+        parts[4] or "",
+        parts[5] or "",
+        parts[6] or "",
+        "",
+        parts[7] or "",
+        parts[8] or "",
     }, SIGNATURE_SEPARATOR)
 end
 
@@ -2644,6 +2894,10 @@ function GrimmorySync:metadataSignatureMatches(manifest_entry, remote)
         return true, true
     end
 
+    if self:stableSignatureWithEditionFromPriorCurrent(manifest_entry.signature) == current_signature then
+        return true, true
+    end
+
     return false, false
 end
 
@@ -2657,6 +2911,7 @@ function GrimmorySync:migrateManifestSignature(manifest_entry, remote)
     manifest_entry.author = remote.author
     manifest_entry.hardcover_id = remote.hardcover_id
     manifest_entry.hardcover_book_id = remote.hardcover_book_id
+    manifest_entry.hardcover_edition_id = remote.hardcover_edition_id
     manifest_entry.signature_migrated_at = os.time()
 end
 
@@ -2670,6 +2925,7 @@ function GrimmorySync:updateManifestRemoteState(manifest_entry, remote)
     manifest_entry.author = remote.author
     manifest_entry.hardcover_id = remote.hardcover_id
     manifest_entry.hardcover_book_id = remote.hardcover_book_id
+    manifest_entry.hardcover_edition_id = remote.hardcover_edition_id
 end
 
 function GrimmorySync:getManifestEntry(manifest, path)
@@ -2688,6 +2944,7 @@ function GrimmorySync:storeManifestEntry(manifest, path, remote)
         author = remote.author,
         hardcover_id = remote.hardcover_id,
         hardcover_book_id = remote.hardcover_book_id,
+        hardcover_edition_id = remote.hardcover_edition_id,
         refreshed_at = os.time(),
     }
 end
@@ -2727,7 +2984,7 @@ function GrimmorySync:localBookFromPath(path)
         return nil, _("No book file selected.")
     end
     if not self:isEpubPath(path) then
-        return nil, _("Only EPUB files can be refreshed from Grimmory.")
+        return nil, _("Only EPUB files can be refreshed from the library server.")
     end
 
     local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
@@ -2919,24 +3176,26 @@ function GrimmorySync:apiAuthHeaders(token)
     local headers = {}
     if type(token) == "string" and token ~= "" then
         headers["authorization"] = "Bearer " .. token
-    elseif self.username ~= "" and self.password ~= "" then
+    elseif not self:provider().api_credentials_separate
+        and self.username ~= "" and self.password ~= "" then
         local mime = require("mime")
         headers["authorization"] = "Basic " .. mime.b64(self.username .. ":" .. self.password)
     end
     return headers
 end
 
-function GrimmorySync:loginToGrimmoryApi()
-    if self.username == "" or self.password == "" then
-        return nil, _("Grimmory API sync requires username and password.")
+function GrimmorySync:loginToServerApi()
+    local api_username, api_password = self:apiCredentials()
+    if api_username == "" or api_password == "" then
+        return nil, string.format(_("%s API sync requires an account username and password."), self:serverName())
     end
 
     local body = jsonObject({
-        username = self.username,
-        password = self.password,
+        username = api_username,
+        password = api_password,
     })
 
-    local response, err = self:httpRequest(self:buildServerUrl("/api/v1/auth/login"), {
+    local response, err = self:httpRequest(self:buildServerUrl(self:provider().api_login), {
         method = "POST",
         body = body,
         headers = {
@@ -2958,7 +3217,7 @@ function GrimmorySync:loginToGrimmoryApi()
     end
 
     if type(data.accessToken) ~= "string" or data.accessToken == "" then
-        return nil, _("No access token returned by Grimmory.")
+        return nil, string.format(_("No access token returned by %s."), self:serverName())
     end
 
     return data.accessToken, nil
@@ -3052,34 +3311,118 @@ function GrimmorySync:metadataFieldValue(value)
     return ""
 end
 
-function GrimmorySync:fetchBookMetadataFromGrimmoryApi(token)
-    logger.info("[GrimmorySync] Fetching book metadata from Grimmory API")
+function GrimmorySync:fetchBookMetadataFromServerApi(token)
+    logger.info("[GrimmorySync] Fetching book metadata from", self:serverName(), "API")
     local headers = self:apiAuthHeaders(token)
     headers["accept"] = "application/json"
+    local api = self:provider().book_api
 
-    local response, err = self:httpRequest(self:buildServerUrl("/api/v1/books?stripForListView=false"), {
-        headers = headers,
-    })
-    if err then
-        return nil, err
-    end
-
-    local data, decode_err = jsonDecode(response)
-    if not data then
-        local fallback_books = parseBookMetadataFallback(response)
-        if #fallback_books > 0 then
-            logger.info("[GrimmorySync] Parsed book metadata with fallback JSON parser:", #fallback_books)
-            return fallback_books, nil
+    if not api.paginated then
+        local response, err = self:httpRequest(self:buildServerUrl(api.endpoint), {
+            method = api.method or "GET",
+            headers = headers,
+        })
+        if err then
+            return nil, err
         end
-        return nil, decode_err
+
+        local data, decode_err = jsonDecode(response)
+        if not data then
+            local fallback_books = parseBookMetadataFallback(response)
+            if #fallback_books > 0 then
+                logger.info("[GrimmorySync] Parsed book metadata with fallback JSON parser:", #fallback_books)
+                return fallback_books, nil
+            end
+            return nil, decode_err
+        end
+
+        local books = self:extractBooksArray(data)
+        if not books then
+            return nil, _("Could not find books array in server API response.")
+        end
+        return books, nil
     end
 
-    local books = self:extractBooksArray(data)
-    if not books then
-        return nil, _("Could not find books array in Grimmory API response.")
+    headers["content-type"] = "application/json"
+    local page = 0
+    local page_size = api.page_size or 200
+    local books = {}
+    while true do
+        local body = string.format(
+            '{"sort":[{"field":"title","dir":"asc"}],"pagination":{"page":%d,"size":%d},"collapseSeries":false}',
+            page,
+            page_size
+        )
+        local response, err = self:httpRequest(self:buildServerUrl(api.endpoint), {
+            method = api.method or "POST",
+            body = body,
+            headers = headers,
+        })
+        if err then
+            return nil, err
+        end
+
+        local data, decode_err = jsonDecode(response)
+        if not data then
+            return nil, decode_err
+        end
+        local page_books = self:extractBooksArray(data)
+        if not page_books then
+            return nil, _("Could not find books array in server API response.")
+        end
+        for _, book in ipairs(page_books) do
+            books[#books + 1] = book
+        end
+
+        local total = tonumber(data.total)
+        if #page_books < page_size or (total and #books >= total) then
+            break
+        end
+        page = page + 1
     end
 
     return books, nil
+end
+
+function GrimmorySync:apiStringList(value)
+    local result = {}
+    if type(value) ~= "table" then
+        return result
+    end
+    for _, item in ipairs(value) do
+        local text
+        if type(item) == "table" then
+            text = self:metadataFieldValue(item.name or item.title or item.value)
+        else
+            text = self:metadataFieldValue(item)
+        end
+        if text ~= "" then
+            result[#result + 1] = text
+        end
+    end
+    return result
+end
+
+function GrimmorySync:mergeBookCategories(remote, metadata)
+    local seen = {}
+    local merged = {}
+    for _, value in ipairs(remote.genres or {}) do
+        local key = tostring(value):lower()
+        if not seen[key] then
+            seen[key] = true
+            merged[#merged + 1] = value
+        end
+    end
+    for _, field in ipairs({ metadata.genres, metadata.tags }) do
+        for _, value in ipairs(self:apiStringList(field)) do
+            local key = value:lower()
+            if not seen[key] then
+                seen[key] = true
+                merged[#merged + 1] = value
+            end
+        end
+    end
+    remote.genres = merged
 end
 
 function GrimmorySync:applyBookApiMetadata(remote_books, api_books)
@@ -3128,8 +3471,17 @@ function GrimmorySync:applyBookApiMetadata(remote_books, api_books)
         if api_book then
             local metadata = self:bookApiMetadata(api_book)
             local primary_file = type(api_book.primaryFile) == "table" and api_book.primaryFile or nil
-            remote.hardcover_id = self:metadataFieldValue(metadata.hardcoverId)
-            remote.hardcover_book_id = self:metadataFieldValue(metadata.hardcoverBookId)
+            local hardcover_id = self:metadataFieldValue(metadata.hardcoverId)
+            local hardcover_book_id = self:metadataFieldValue(metadata.hardcoverBookId)
+            local hardcover_edition_id = self:metadataFieldValue(metadata.hardcoverEditionId)
+            if hardcover_id ~= "" then remote.hardcover_id = hardcover_id end
+            if hardcover_book_id ~= "" then remote.hardcover_book_id = hardcover_book_id end
+            if hardcover_edition_id ~= "" then remote.hardcover_edition_id = hardcover_edition_id end
+            local series = self:metadataFieldValue(metadata.seriesName or metadata.series)
+            local series_index = self:metadataFieldValue(metadata.seriesIndex)
+            if series ~= "" then remote.series = series end
+            if series_index ~= "" then remote.series_index = series_index end
+            self:mergeBookCategories(remote, metadata)
             if primary_file then
                 remote.grimmory_file_name = self:metadataFieldValue(primary_file.fileName)
                 remote.grimmory_file_sub_path = self:metadataFieldValue(primary_file.fileSubPath)
@@ -3148,7 +3500,7 @@ function GrimmorySync:applyBookApiMetadata(remote_books, api_books)
     logger.info(
         "[GrimmorySync] Enriched",
         updated,
-        "books with Grimmory API metadata",
+        "books with server API metadata",
         "(id:",
         matched_by_id,
         "title-author:",
@@ -3165,13 +3517,13 @@ function GrimmorySync:applyBookApiMetadata(remote_books, api_books)
 end
 
 function GrimmorySync:enrichRemoteBooksWithBookApiMetadata(remote_books)
-    local token, login_err = self:loginToGrimmoryApi()
+    local token, login_err = self:loginToServerApi()
     if not token then
         logger.warn("[GrimmorySync] Book metadata API enrichment skipped:", login_err)
         return false, login_err
     end
 
-    local api_books, err = self:fetchBookMetadataFromGrimmoryApi(token)
+    local api_books, err = self:fetchBookMetadataFromServerApi(token)
     if not api_books then
         logger.warn("[GrimmorySync] Book metadata API enrichment failed:", err)
         return false, err
@@ -3198,39 +3550,54 @@ function GrimmorySync:extractAuthorsArray(data)
         or asArray(data)
 end
 
-function GrimmorySync:fetchAuthorsFromGrimmory(token)
-    logger.info("[GrimmorySync] Fetching authors for Bookshelf images")
+function GrimmorySync:fetchAuthorsFromServer(token)
+    logger.info("[GrimmorySync] Fetching", self:serverName(), "authors for Bookshelf images")
     local headers = self:apiAuthHeaders(token)
     headers["accept"] = "application/json"
+    local api = self:provider().author_api
+    local page = 0
+    local page_size = api.page_size or 100
+    local authors = {}
 
-    local response, err = self:httpRequest(self:buildServerUrl("/api/v1/authors"), {
-        headers = headers,
-    })
-    if err then
-        return nil, err
-    end
-
-    local data, decode_err = jsonDecode(response)
-    if not data then
-        local fallback_authors = parseAuthorsFallback(response)
-        if #fallback_authors > 0 then
-            logger.info("[GrimmorySync] Parsed authors with fallback JSON parser:", #fallback_authors)
-            return fallback_authors, nil
+    while true do
+        local endpoint = api.endpoint
+        if api.paginated then
+            local separator = endpoint:find("?", 1, true) and "&" or "?"
+            endpoint = endpoint .. separator .. "page=" .. tostring(page) .. "&size=" .. tostring(page_size)
         end
-        return nil, decode_err
-    end
-
-    local authors = self:extractAuthorsArray(data)
-    if not authors then
-        local fallback_authors = parseAuthorsFallback(response)
-        if #fallback_authors > 0 then
-            logger.info("[GrimmorySync] Parsed authors from unknown response shape:", #fallback_authors)
-            return fallback_authors, nil
+        local response, err = self:httpRequest(self:buildServerUrl(endpoint), {
+            headers = headers,
+        })
+        if err then
+            return nil, err
         end
-        return nil, _("Could not find authors array in Grimmory response.")
+
+        local data, decode_err = jsonDecode(response)
+        if not data then
+            local fallback_authors = parseAuthorsFallback(response)
+            if #fallback_authors > 0 and not api.paginated then
+                logger.info("[GrimmorySync] Parsed authors with fallback JSON parser:", #fallback_authors)
+                return fallback_authors, nil
+            end
+            return nil, decode_err
+        end
+
+        local page_authors = self:extractAuthorsArray(data)
+        if not page_authors then
+            return nil, _("Could not find authors array in server response.")
+        end
+        for _, author in ipairs(page_authors) do
+            authors[#authors + 1] = author
+        end
+
+        local total = tonumber(data.total)
+        if not api.paginated or #page_authors < page_size or (total and #authors >= total) then
+            break
+        end
+        page = page + 1
     end
 
-    logger.info("[GrimmorySync] Authors returned by Grimmory:", #authors)
+    logger.info("[GrimmorySync] Authors returned by", self:serverName() .. ":", #authors)
     return authors, nil
 end
 
@@ -3271,7 +3638,7 @@ function GrimmorySync:downloadAuthorImage(author, token)
         return false, _("Could not create Bookshelf author image directory.")
     end
 
-    local tmp_path = image_dir .. "/.grimmory-author-" .. tostring(id) .. ".tmp"
+    local tmp_path = image_dir .. "/.library-sync-author-" .. tostring(id) .. ".tmp"
     pcall(os.remove, tmp_path)
 
     local file = io.open(tmp_path, "wb")
@@ -3279,8 +3646,9 @@ function GrimmorySync:downloadAuthorImage(author, token)
         return false, _("Could not create temporary author image file.")
     end
 
-    local image_url = "/api/v1/media/author/" .. tostring(id) .. "/photo"
-    if type(token) == "string" and token ~= "" then
+    local provider = self:provider()
+    local image_url = provider.author_image_path(id)
+    if provider.author_image_token_query and type(token) == "string" and token ~= "" then
         image_url = image_url .. "?token=" .. urlEncode(token)
     end
 
@@ -3355,17 +3723,19 @@ function GrimmorySync:syncAuthorImagesAsync(done_callback)
 
     local ok, token_or_err, authors_or_err = pcall(function()
         self:showProgressDialog(_("Signing in for Bookshelf author images..."))
-        local token, err = self:loginToGrimmoryApi()
-        if not token then
+        local token, err = self:loginToServerApi()
+        if not token and not self:provider().api_credentials_separate then
             logger.warn("[GrimmorySync] Token login for author images failed; trying Basic auth:", err)
+        elseif not token then
+            return nil, err
         end
 
         if self.abort_sync then
             return nil, ABORTED
         end
 
-        self:showProgressDialog(_("Fetching authors from Grimmory..."))
-        local authors, authors_err = self:fetchAuthorsFromGrimmory(token)
+        self:showProgressDialog(string.format(_("Fetching authors from %s..."), self:serverName()))
+        local authors, authors_err = self:fetchAuthorsFromServer(token)
         if not authors then
             if err then
                 authors_err = tostring(authors_err) .. " (token login failed: " .. tostring(err) .. ")"
@@ -4170,7 +4540,7 @@ function GrimmorySync:performAutomaticMetadataRefresh(reason)
         return
     end
 
-    if self.server_url == nil or self.server_url == "" then
+    if not self:configurationReady() then
         self:finishAutomaticMetadataRefresh(false, { error = "server_not_configured" })
         return
     end
@@ -4189,7 +4559,7 @@ function GrimmorySync:performAutomaticMetadataRefresh(reason)
         local local_books = self:scanLocalBooks()
         logger.info("[GrimmorySync] Automatic refresh local books:", #local_books)
 
-        local remote_books, err = self:fetchBooklistFromGrimmory()
+        local remote_books, err = self:fetchBooklistFromServer()
         if not remote_books then
             return false, err
         end
@@ -4285,19 +4655,8 @@ function GrimmorySync:onGrimmoryRefreshOpenBookMetadata()
 end
 
 function GrimmorySync:startSync()
-    if self.server_url == "" then
-        local config_dialog
-        config_dialog = ConfirmBox:new{
-            text = _("Server not configured!\n\nConfigure now?"),
-            ok_text = _("Configure"),
-            ok_callback = function()
-                pcall(function() UIManager:close(config_dialog) end)
-                UIManager:scheduleIn(0, function()
-                    self:showServerConfig()
-                end)
-            end,
-        }
-        UIManager:show(config_dialog)
+    if not self:configurationReady() then
+        self:promptConfiguration()
         return
     end
     
@@ -4367,19 +4726,8 @@ end
 function GrimmorySync:startMetadataRefreshForFile(file_path, options)
     options = options or {}
 
-    if self.server_url == "" then
-        local config_dialog
-        config_dialog = ConfirmBox:new{
-            text = _("Server not configured!\n\nConfigure now?"),
-            ok_text = _("Configure"),
-            ok_callback = function()
-                pcall(function() UIManager:close(config_dialog) end)
-                UIManager:scheduleIn(0, function()
-                    self:showServerConfig()
-                end)
-            end,
-        }
-        UIManager:show(config_dialog)
+    if not self:configurationReady() then
+        self:promptConfiguration()
         return
     end
 
@@ -4404,7 +4752,7 @@ function GrimmorySync:startMetadataRefreshForFile(file_path, options)
         local close_dialog
         close_dialog = ConfirmBox:new{
             text = string.format(
-                _("Refresh metadata for the open book?\n\n%s\n\nKOReader must close the book before Grimmory Sync can replace the EPUB safely."),
+                _("Refresh metadata for the open book?\n\n%s\n\nKOReader must close the book before Library Sync can replace the EPUB safely."),
                 self:displayNameForPath(file_path)
             ),
             ok_text = _("Close and refresh"),
@@ -4421,7 +4769,7 @@ function GrimmorySync:startMetadataRefreshForFile(file_path, options)
     local confirm_dialog
     confirm_dialog = ConfirmBox:new{
         text = string.format(
-            _("Refresh metadata for this book?\n\n%s\n\nOnly this local EPUB will be matched and replaced if Grimmory metadata has changed."),
+            _("Refresh metadata for this book?\n\n%s\n\nOnly this local EPUB will be matched and replaced if server metadata has changed."),
             self:displayNameForPath(file_path)
         ),
         ok_text = _("Refresh"),
@@ -4437,19 +4785,8 @@ function GrimmorySync:startMetadataRefreshForFile(file_path, options)
 end
 
 function GrimmorySync:startMetadataRefresh()
-    if self.server_url == "" then
-        local config_dialog
-        config_dialog = ConfirmBox:new{
-            text = _("Server not configured!\n\nConfigure now?"),
-            ok_text = _("Configure"),
-            ok_callback = function()
-                pcall(function() UIManager:close(config_dialog) end)
-                UIManager:scheduleIn(0, function()
-                    self:showServerConfig()
-                end)
-            end,
-        }
-        UIManager:show(config_dialog)
+    if not self:configurationReady() then
+        self:promptConfiguration()
         return
     end
 
@@ -4458,7 +4795,7 @@ function GrimmorySync:startMetadataRefresh()
 
     local confirm_dialog
     confirm_dialog = ConfirmBox:new{
-        text = _("Refresh metadata in existing books?\n\nThe plugin will download matched EPUB files again from Grimmory and replace local files only after the download has been verified. Missing books are not downloaded here. The currently open book is skipped."),
+        text = _("Refresh metadata in existing books?\n\nThe plugin will download matched EPUB files again from the configured server and replace local files only after the download has been verified. Missing books are not downloaded here. The currently open book is skipped."),
         ok_text = _("Refresh"),
         cancel_text = _("Cancel"),
         ok_callback = function()
@@ -4474,7 +4811,7 @@ end
 function GrimmorySync:performSync()
     if self.sync_running or self.auto_refresh_running then
         UIManager:show(InfoMessage:new{
-            text = _("Grimmory Sync is already running."),
+            text = _("Library Sync is already running."),
             timeout = 3,
         })
         return
@@ -4495,7 +4832,7 @@ function GrimmorySync:performSync()
             #local_books
         ))
         
-        local remote_books, err = self:fetchBooklistFromGrimmory()
+        local remote_books, err = self:fetchBooklistFromServer()
         
         if not remote_books then
             return false, err
@@ -4507,7 +4844,7 @@ function GrimmorySync:performSync()
         
         logger.info("[GrimmorySync] Remote books found:", #remote_books)
 
-        self:showProgressDialog(_("Fetching extra metadata from Grimmory..."))
+        self:showProgressDialog(string.format(_("Fetching extra metadata from %s..."), self:serverName()))
         local enriched, enrich_result = self:enrichRemoteBooksWithBookApiMetadata(remote_books)
         if enriched then
             logger.info("[GrimmorySync] Book API metadata applied:", enrich_result)
@@ -4618,7 +4955,7 @@ end
 function GrimmorySync:performMetadataRefreshForFile(file_path)
     if self.sync_running or self.auto_refresh_running then
         UIManager:show(InfoMessage:new{
-            text = _("Grimmory Sync is already running."),
+            text = _("Library Sync is already running."),
             timeout = 3,
         })
         return
@@ -4653,7 +4990,7 @@ function GrimmorySync:performMetadataRefreshForFile(file_path)
             target_name
         ))
 
-        local remote_books, err = self:fetchBooklistFromGrimmory()
+        local remote_books, err = self:fetchBooklistFromServer()
         if not remote_books then
             return false, err
         end
@@ -4662,7 +4999,7 @@ function GrimmorySync:performMetadataRefreshForFile(file_path)
             return false, ABORTED
         end
 
-        self:showProgressDialog(_("Fetching extra metadata from Grimmory..."))
+        self:showProgressDialog(string.format(_("Fetching extra metadata from %s..."), self:serverName()))
         local enriched, enrich_result = self:enrichRemoteBooksWithBookApiMetadata(remote_books)
         if enriched then
             logger.info("[GrimmorySync] Book API metadata applied:", enrich_result)
@@ -4737,7 +5074,7 @@ function GrimmorySync:performMetadataRefreshForFile(file_path)
                 and (self.selected_feed_label ~= "" and self.selected_feed_label or self.selected_feed)
                 or _("All books")
             message = string.format(
-                _("No matching Grimmory book was found for this EPUB in the selected sync source.\n\nFile: %s\nSource: %s"),
+                _("No matching server book was found for this EPUB in the selected sync source.\n\nFile: %s\nSource: %s"),
                 stats.target_name or target_name,
                 sync_source
             )
@@ -4801,7 +5138,7 @@ end
 function GrimmorySync:performMetadataRefresh()
     if self.sync_running or self.auto_refresh_running then
         UIManager:show(InfoMessage:new{
-            text = _("Grimmory Sync is already running."),
+            text = _("Library Sync is already running."),
             timeout = 3,
         })
         return
@@ -4822,7 +5159,7 @@ function GrimmorySync:performMetadataRefresh()
             #local_books
         ))
 
-        local remote_books, err = self:fetchBooklistFromGrimmory()
+        local remote_books, err = self:fetchBooklistFromServer()
 
         if not remote_books then
             return false, err
@@ -4834,7 +5171,7 @@ function GrimmorySync:performMetadataRefresh()
 
         logger.info("[GrimmorySync] Remote books found:", #remote_books)
 
-        self:showProgressDialog(_("Fetching extra metadata from Grimmory..."))
+        self:showProgressDialog(string.format(_("Fetching extra metadata from %s..."), self:serverName()))
         local enriched, enrich_result = self:enrichRemoteBooksWithBookApiMetadata(remote_books)
         if enriched then
             logger.info("[GrimmorySync] Book API metadata applied:", enrich_result)
@@ -4970,10 +5307,16 @@ function GrimmorySync:showStatus()
         auto_refresh[#auto_refresh + 1] = interval_label
     end
     local auto_refresh_text = #auto_refresh > 0 and table.concat(auto_refresh, ", ") or _("off")
+    local api_username = self:apiCredentials()
+    if api_username == "" then
+        api_username = _("Not set")
+    end
     local text = string.format(
-        _("Server: %s\nUser: %s\nPath: %s\nLocal: %d books\nSync source: %s\nFolder profile: %s\nFile naming: %s\nCustom rules: %s\nAutomatic metadata refresh: %s\nOPDS timestamp trigger: %s\nBookshelf author images: %s\nBookshelf image path: %s"),
+        _("Server type: %s\nServer: %s\nOPDS user: %s\nAPI user: %s\nPath: %s\nLocal: %d books\nSync source: %s\nFolder profile: %s\nFile naming: %s\nCustom rules: %s\nAutomatic metadata refresh: %s\nOPDS timestamp trigger: %s\nBookshelf author images: %s\nBookshelf image path: %s"),
+        self:serverName(),
         self.server_url ~= "" and self.server_url or _("Not set"),
         self.username ~= "" and self.username or _("Not set"),
+        api_username,
         self.local_path,
         #books,
         sync_source,

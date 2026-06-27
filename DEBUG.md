@@ -1,167 +1,73 @@
-# 🐛 Felsökningsguide - Plugin syns inte
+# Troubleshooting Library Sync
 
-I exemplen betyder `<koreader>` KOReaders användarmapp på din enhet, alltså mappen som innehåller `plugins/` och `crash.log`.
+## Plugin does not appear
 
-## Steg 1: Verifiera filstrukturen
+Verify the exact directory structure:
 
-Kontrollera att du har EXAKT denna struktur på din e-läsare:
-
-```
-<koreader>/
-  └── plugins/
-      └── grimmory-sync.koplugin/
-          ├── _meta.lua
-          ├── main.lua
-          ├── README.md
-          ├── test-minimal.lua  (ny fil)
-          └── DEBUG.md (denna fil)
-```
-
-**VIKTIGT:** Mappen MÅSTE heta `grimmory-sync.koplugin` (med punkten före koplugin)
-
-## Steg 2: Testa med minimal version
-
-1. **Byt namn på filer:**
-   - Byt namn på `main.lua` till `main.lua.backup`
-   - Byt namn på `test-minimal.lua` till `main.lua`
-
-2. **Starta om KOReader:**
-   - Stäng KOReader HELT
-   - Öppna KOReader igen
-
-3. **Kolla om "Grimmory Sync (TEST)" syns i menyn**
-   - Om JA → Pluginet fungerar, problemet är i huvudkoden
-   - Om NEJ → Gå till Steg 3
-
-## Steg 3: Kontrollera var KOReader letar
-
-KOReader kan leta på olika platser beroende på plattform och installation. Leta efter den mapp som innehåller KOReaders `plugins/`-mapp.
-
-### Förväntad struktur
-```
+```text
 <koreader>/plugins/grimmory-sync.koplugin/
+  _meta.lua
+  main.lua
+  grimmory_updater.lua
+  providers/
+    init.lua
+    grimmory.lua
+    bookorbit.lua
 ```
 
-## Steg 4: Hitta rätt plats via KOReader
+Common causes:
 
-1. Öppna KOReader
-2. Gå till: Verktyg → Mer verktyg → Terminal emulator (om den finns)
-3. Eller installera ett existerande plugin för att se var plugins ligger
+- The ZIP created a nested `grimmory-sync.koplugin/grimmory-sync.koplugin/` directory.
+- The directory does not end in `.koplugin`.
+- KOReader was backgrounded instead of fully restarted.
+- The files were copied to a different KOReader installation's storage directory.
 
-**Enklare metod:**
-1. Använd en filhanterare-app på enheten
-2. Sök efter "koreader"
-3. Hitta `plugins`-mappen
-4. Lägg pluginet där
+## Check Lua syntax
 
-## Steg 5: Kontrollera KOReader-version
-
-Vissa äldre versioner av KOReader kanske inte stöder alla funktioner.
-
-1. Öppna KOReader
-2. Gå till: Hjälp → Om
-3. Kolla versionen
-
-**Minsta rekommenderade version:** v2021.04 eller senare
-
-## Steg 6: Manuell syntax-kontroll
-
-Om du har tillgång till en terminal på enheten:
+From a system with Lua installed:
 
 ```bash
-# Testa Lua-syntax
-cd <koreader>/plugins/grimmory-sync.koplugin/
-luac -p main.lua
-
-# Om fel, byt till minimal version:
-mv main.lua main.lua.broken
-mv test-minimal.lua main.lua
+cd grimmory-sync.koplugin
+luac -p main.lua _meta.lua grimmory_updater.lua providers/*.lua
 ```
 
-## Steg 7: Kolla KOReader-loggen
+## Check the log
 
-1. Stäng KOReader
-2. Med filhanterare, gå till `<koreader>/`
-3. Öppna `crash.log` med textläsare
-4. Leta efter:
-   - `grimmorysync`
-   - `grimmory-sync.koplugin`
-   - `error` eller `failed`
+KOReader normally writes its log to:
 
-**Vanliga fel du kan se:**
-
-### "module 'datastorage' not found"
-→ KOReader-version är för gammal
-
-### "unexpected symbol near"
-→ Syntax-fel i koden, använd minimal version
-
-### Inget meddelande alls
-→ KOReader läser inte från den mappen du kopierat till
-
-## Steg 8: Prova alternativ plats
-
-Om ingenting fungerar, prova denna metod:
-
-1. **Hitta ett plugin som FUNGERAR:**
-   - Gå till Verktyg i KOReader
-   - Se vilket plugin som helst som redan finns (t.ex. "Statistics", "Calibre", etc.)
-
-2. **Använd en filhanterare:**
-   - Sök efter det plugin-namnet på enheten
-   - Hitta var det ligger (t.ex. `.../statistics.koplugin/`)
-   - Lägg ditt plugin i SAMMA mapp
-
-3. **Exempel:**
-   - Om du hittar: `<koreader>/plugins/statistics.koplugin/`
-   - Kopiera din mapp till: `<koreader>/plugins/grimmory-sync.koplugin/`
-
-## Steg 9: ADB-metoden (Avancerat)
-
-Om du har ADB aktiverat:
-
-```bash
-# Hitta rätt plats
-adb shell find /sdcard -name "*.koplugin" -type d 2>/dev/null
-adb shell find /storage -name "*.koplugin" -type d 2>/dev/null
-
-# Kopiera dit
-adb push grimmory-sync.koplugin /RÄTT/PLATS/plugins/
-
-# Starta om KOReader
-adb shell am force-stop org.koreader.launcher
-adb shell am start org.koreader.launcher
+```text
+<koreader>/crash.log
 ```
 
-## Steg 10: Sista utvägen
+Search for:
 
-Om INGENTING fungerar, testa:
+```text
+[GrimmorySync]
+grimmorysync
+grimmory-sync.koplugin
+```
 
-1. Avinstallera KOReader
-2. Installera om KOReader
-3. Öppna KOReader en gång (så att mappar skapas)
-4. Kopiera pluginet till plugins-mappen
-5. Starta om
+The internal identifiers retain the old Grimmory name for compatibility even when BookOrbit is selected.
 
-## 📋 Checklista
+## Connection failures
 
-Bocka av när du gjort:
+Confirm that:
 
-- [ ] Verifierat mappnamnet: `grimmory-sync.koplugin` (med .koplugin)
-- [ ] Verifierat att `_meta.lua` och `main.lua` finns i mappen
-- [ ] Startat om KOReader (inte bara stängt en bok)
-- [ ] Testat minimal version (`test-minimal.lua` → `main.lua`)
-- [ ] Kollat crash.log efter felmeddelanden
-- [ ] Försökt hitta andra .koplugin-mappar och lagt pluginet där
-- [ ] Verifierat KOReader-version (minst v2021.04)
+- The server URL is the origin, such as `https://books.example.com`, not a browser-only local address.
+- The KOReader device can reach that address.
+- Reverse proxies allow `/api/v1/opds` and book download requests.
+- The configured username and password are OPDS credentials.
 
-## 🆘 Om inget fungerar
+BookOrbit's normal account credentials do not authenticate its OPDS catalogue. Configure them separately only for optional API metadata and author images.
 
-Skicka denna information:
+## Useful issue details
 
-1. **Var la du pluginet?** (fullständig sökväg)
-2. **Vad säger crash.log?** (om något)
-3. **Vilken KOReader-version?** (Hjälp → Om)
-4. **Andra plugins fungerar?** (vilka?)
-5. **Vilken enhet och firmware-version?**
-6. **Har du provat minimal version?** (test-minimal.lua)
+Include the following when reporting a problem:
+
+- KOReader version
+- Device and firmware
+- Library Sync version
+- Selected server type
+- Relevant `[GrimmorySync]` log lines
+- Whether all-books sync or a restricted sync source was selected
+- Approximate local and remote library sizes

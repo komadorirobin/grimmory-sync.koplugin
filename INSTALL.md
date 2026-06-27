@@ -1,104 +1,64 @@
-# Snabbinstallation för Grimmory Sync Plugin
+# Installing Library Sync
 
-## 📋 Checklista
+## 1. Copy the plugin
 
-Följ dessa steg exakt:
+Copy the complete `grimmory-sync.koplugin` directory to KOReader's plugin directory:
 
-I exemplen betyder `<koreader>` KOReaders användarmapp på din enhet, alltså mappen som innehåller `plugins/` och `crash.log`.
-
-### 1. Förbered pluginet på din dator
-
-✅ Kontrollera att du har mappen: `grimmory-sync.koplugin/`
-✅ Mappen innehåller minst: `_meta.lua` och `main.lua`
-
-### 2. Installera på din KOReader-enhet
-
-#### Alternativ A: Via USB
-
-1. **Anslut e-läsaren till datorn**
-   - Använd USB-kabel
-   - Välj "File Transfer" / "Överför filer" på e-läsaren
-
-2. **Hitta plugins-mappen**
-   - På datorn, navigera till e-läsarens lagring
-   - Gå till: `koreader/plugins/`
-   - Om `plugins` inte finns, skapa den
-
-3. **Kopiera pluginet**
-   - Kopiera HELA mappen `grimmory-sync.koplugin` till `koreader/plugins/`
-   - Den fullständiga sökvägen ska bli:
-     ```
-     <koreader>/plugins/grimmory-sync.koplugin/_meta.lua
-     <koreader>/plugins/grimmory-sync.koplugin/main.lua
-     ```
-
-4. **Koppla från USB**
-
-#### Alternativ B: Via ADB (Avancerat)
-
-```bash
-# Aktivera USB-debugging på enheten först
-adb devices
-adb push grimmory-sync.koplugin <koreader>/plugins/
+```text
+<koreader>/plugins/grimmory-sync.koplugin/
 ```
 
-### 3. Starta om KOReader
+The files must be directly inside that directory, not inside a second nested directory. At minimum, verify that these paths exist:
 
-1. **Stäng KOReader helt:**
-   - Använd enhetens vanliga sätt att stänga appen helt
-   - Om KOReader bara hamnar i bakgrunden, tvångsavsluta appen från enhetens apphantering
+```text
+<koreader>/plugins/grimmory-sync.koplugin/_meta.lua
+<koreader>/plugins/grimmory-sync.koplugin/main.lua
+<koreader>/plugins/grimmory-sync.koplugin/providers/init.lua
+```
 
-2. **Starta KOReader igen**
+`<koreader>` is KOReader's user storage directory on the device.
 
-### 4. Verifiera installationen
+## 2. Restart KOReader
 
-1. Öppna KOReader
-2. Tryck på menyikonen (☰) överst till vänster
-3. Öppna **förstoringsglas-menyn** / **magnifying glass menu**
-4. Du bör se **"Grimmory Sync"** i listan
+Exit KOReader completely and start it again. Backgrounding the Android application is not sufficient; force-stop it if necessary.
 
-Om du INTE ser "Grimmory Sync":
-- ✅ Kontrollera att mappen verkligen heter `.koplugin` (inte `.koplugin.koplugin`)
-- ✅ Kontrollera att filerna ligger direkt i mappen (inte i en undermapp)
-- ✅ Starta om KOReader igen
-- ✅ Kolla loggen (se nedan)
+## 3. Configure the plugin
 
-## 🔍 Kontrollera loggen
+Open:
 
-1. Använd en filhanterare på enheten
-2. Gå till: `<koreader>/`
-3. Öppna `crash.log` med en textläsare
-4. Leta efter rader med `[GrimmorySync]` eller `grimmorysync`
-5. Om du ser felmeddelanden, kopiera dem och dela med utvecklaren
+```text
+Menu -> Magnifying glass -> Library Sync -> Configure
+```
 
-## 🚀 Första gången
+Choose Grimmory or BookOrbit, enter the server origin URL or full `/api/v1/opds` URL and the OPDS credentials, then choose a writable local book directory.
 
-När pluginet syns i menyn:
+For BookOrbit, create dedicated OPDS credentials under BookOrbit's OPDS settings. The optional normal BookOrbit account credentials enable extra genres, tags, Hardcover identifiers, and Bookshelf author images.
 
-1. **Gå till: Meny → Förstoringsglas → Grimmory Sync → Configure**
-2. Ange Grimmory-serverns adress och port (t.ex. `http://192.168.1.100:6060`)
-3. Ange användarnamn och lösenord för Grimmory
-4. **Gå till: Meny → Förstoringsglas → Grimmory Sync → Sync missing books**
-5. Vänta medan pluginet laddar ner dina böcker! 📚
+## 4. Run the first sync
 
-## ℹ️ Hitta serverns IP-adress
+Open:
 
-Öppna nätverksinställningarna på datorn eller servern som kör Grimmory och leta efter IPv4-adressen på samma nätverk som läsplattan. Använd den adressen i `Server URL`, till exempel `http://192.168.1.100:6060`.
+```text
+Menu -> Magnifying glass -> Library Sync -> Sync missing books
+```
 
-## 📝 Vanliga problem
+Start with a restricted shelf, collection, or SmartScope if you want to verify the resulting folder and filename layout before syncing the full library.
 
-| Problem | Lösning |
-|---------|---------|
-| Pluginet syns inte | Se checklistan ovan, kontrollera mappnamn |
-| "Module not found" | Starta om KOReader, kontrollera filbehörigheter |
-| "Cannot connect" | Kontrollera att Grimmory-servern och läsplattan är på samma nätverk |
-| "401 Unauthorized" | Kontrollera användarnamn och lösenord |
-| Inga böcker laddas ner | Kontrollera att den lokala biblioteksmappen finns och är skrivbar |
+## Troubleshooting
 
-## 🆘 Fortfarande problem?
+| Problem | Check |
+| --- | --- |
+| Plugin is missing | Confirm the `.koplugin` directory name, file nesting, and restart KOReader. |
+| Connection fails | Confirm the device can reach the server origin over the network. |
+| OPDS returns 401 | Use OPDS credentials, not BookOrbit's normal login credentials. |
+| BookOrbit extra metadata is absent | Configure the optional normal BookOrbit account credentials. |
+| No books are downloaded | Confirm the selected sync source contains EPUB files and the local path is writable. |
+| Author images fail | Enable Bookshelf integration and verify API credentials. |
 
-Skapa en issue med:
-- KOReader-version (Hjälp → Om)
-- Enhet och firmware-version
-- Innehållet i `crash.log` (relevanta rader)
-- Vad som händer när du försöker använda pluginet
+KOReader's log is normally located at:
+
+```text
+<koreader>/crash.log
+```
+
+Search for `[GrimmorySync]` or `grimmorysync`; these internal identifiers are retained for compatibility.

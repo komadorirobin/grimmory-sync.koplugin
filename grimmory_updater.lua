@@ -80,7 +80,7 @@ local function httpRequest(url, sink, accept_header)
         url = url,
         method = "GET",
         headers = {
-            ["User-Agent"] = "KOReader-GrimmorySync-Updater/1.0",
+            ["User-Agent"] = "KOReader-LibrarySync-Updater/1.0",
             ["Accept"] = accept_header or "*/*",
         },
         sink = sink,
@@ -275,7 +275,7 @@ end
 local function installUpdate(download_url, version)
     local zip_path = tmpZipPath()
     local parent_dir = PLUGIN_DIR:match("^(.+)/[^/]+$") or PLUGIN_DIR
-    local progress = toast(string.format(_("Downloading Grimmory Sync %s…"), version), 120)
+    local progress = toast(string.format(_("Downloading Library Sync %s…"), version), 120)
     local ok_trapper, Trapper = pcall(require, "ui/trapper")
 
     local function doInstall()
@@ -310,7 +310,7 @@ local function installUpdate(download_url, version)
 
         UIManager:show(ConfirmBox:new{
             text = string.format(
-                _("Grimmory Sync %s installed.\n\nRestart KOReader to apply the update?"),
+                _("Library Sync %s installed.\n\nRestart KOReader to apply the update?"),
                 version
             ),
             ok_text = _("Restart"),
@@ -349,12 +349,12 @@ end
 local function showUpdateDialog(release, current)
     local latest = release.version
     if not versionGreaterThan(latest, current) then
-        toast(string.format(_("Grimmory Sync is up to date (%s)."), current))
+        toast(string.format(_("Library Sync is up to date (%s)."), current))
         return
     end
 
     local text = string.format(
-        _("Grimmory Sync %s is available.\nYou have %s."),
+        _("Library Sync %s is available.\nYou have %s."),
         latest,
         current
     )
