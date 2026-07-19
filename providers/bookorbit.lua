@@ -16,6 +16,11 @@ return {
         paginated = true,
         page_size = 100,
     },
+    author_upload_api = {
+        endpoint = "/api/v1/authors?sort=name&order=asc",
+        paginated = true,
+        page_size = 100,
+    },
     sync_sources = {
         { endpoint = "/api/v1/opds/libraries", kind = "library" },
         { endpoint = "/api/v1/opds/collections", kind = "collection" },
@@ -24,5 +29,10 @@ return {
     author_image_path = function(author_id)
         return "/api/v1/authors/" .. tostring(author_id) .. "/image"
     end,
+    author_image_upload_path = function(author_id)
+        return "/api/v1/authors/" .. tostring(author_id) .. "/image"
+    end,
+    author_image_upload_field = "file",
+    author_image_upload_max_bytes = 20 * 1024 * 1024,
     author_image_token_query = false,
 }

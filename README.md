@@ -14,7 +14,7 @@ The plugin was previously distributed as `grimmory-sync.koplugin`. New installat
 - Safe, manifest-based metadata refresh for existing EPUB files.
 - Optional automatic metadata refresh at startup or on an interval.
 - Configurable folder routing and file naming.
-- Bookshelf-compatible author image downloads.
+- Bookshelf-compatible author image downloads and BookOrbit uploads.
 - SimpleUI actions and recent-download history.
 - Manual OTA updates from GitHub Releases.
 
@@ -26,6 +26,7 @@ The plugin was previously distributed as `grimmory-sync.koplugin`. New installat
 | Restricted sync sources | Shelves and Magic Shelves | Libraries, Collections, and SmartScopes |
 | Extra genres, tags, and Hardcover IDs | Grimmory API | BookOrbit API |
 | Bookshelf author images | Yes | Yes |
+| Upload local Bookshelf author images | No | Yes |
 | Reading progress and highlight sync | Not handled | Use BookOrbit's official KOReader plugin |
 
 Library Sync complements BookOrbit's official KOReader plugin. Library Sync handles book delivery, local file organization, metadata replacement, and Bookshelf images. BookOrbit's plugin handles progress, reading sessions, ratings, and highlights.
@@ -204,6 +205,14 @@ Library Sync -> Bookshelf integration -> Sync Bookshelf author images during met
 ```
 
 Existing images are skipped. Grimmory uses its author media API, and BookOrbit uses its paginated authors API and full author-image endpoint. These API-backed image features require the optional normal server account credentials.
+
+When moving from Grimmory to BookOrbit, existing local Bookshelf images can also be uploaded manually under:
+
+```text
+Library Sync -> Bookshelf integration -> Upload local author images to BookOrbit
+```
+
+The upload reads the same local image directory, matches exact author names, sort names, and Bookshelf slugs, and only fills authors that do not already have a BookOrbit image. Ambiguous matches are skipped and reported. The BookOrbit account must have permission to edit metadata.
 
 ## OTA Updates
 

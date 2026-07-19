@@ -61,6 +61,7 @@ By default, sync only downloads missing books and never removes local files. Ena
 | Extra metadata fails behind a proxy or tunnel | Use the public `https://` server URL. |
 | No books are downloaded | Confirm the selected sync source contains EPUB files and the local path is writable. |
 | Author images fail | Enable Bookshelf integration and verify API credentials. |
+| Author image upload fails | Use BookOrbit account credentials with permission to edit metadata. Existing server images and ambiguous matches are skipped. |
 
 KOReader's log is normally located at:
 

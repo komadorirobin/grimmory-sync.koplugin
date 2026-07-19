@@ -1359,6 +1359,19 @@ function GrimmorySync:getBookshelfIntegrationMenu()
             end,
         },
         {
+            text = _("Upload local author images to BookOrbit"),
+            enabled_func = function()
+                local provider = self:provider()
+                return type(provider.author_image_upload_path) == "function"
+                    and type(provider.author_upload_api) == "table"
+            end,
+            callback = function(touchmenu_instance)
+                self:runAfterMenuClose(touchmenu_instance, function()
+                    self:startAuthorImageUpload()
+                end)
+            end,
+        },
+        {
             text = _("Show Bookshelf author image path"),
             callback = function(touchmenu_instance)
                 self:runAfterMenuClose(touchmenu_instance, function()
@@ -1930,6 +1943,8 @@ function GrimmorySync:httpRequest(url, options)
     local current_url = url
     local method = options.method or "GET"
     local body_text = options.body
+    local source_factory = options.source_factory
+    local body_length = options.content_length
     local redirects = 0
     local max_redirects = options.max_redirects or 5
     local can_follow_redirects = options.follow_redirects ~= false and not options.sink
@@ -1957,6 +1972,18 @@ function GrimmorySync:httpRequest(url, options)
         if body_text then
             headers["content-length"] = tostring(#body_text)
             request.source = ltn12.source.string(body_text)
+        elseif source_factory then
+            local ok_source, source, source_err = pcall(source_factory)
+            if not ok_source then
+                return nil, tostring(source)
+            end
+            if type(source) ~= "function" then
+                return nil, source_err or _("Could not open request body.")
+            end
+            if body_length then
+                headers["content-length"] = tostring(body_length)
+            end
+            request.source = source
         end
 
         local request_func = current_url:match("^https://")
@@ -1984,6 +2011,8 @@ function GrimmorySync:httpRequest(url, options)
                 if status_num == 303 then
                     method = "GET"
                     body_text = nil
+                    source_factory = nil
+                    body_length = nil
                 end
             else
                 local message = string.format(_("HTTP %s"), tostring(status_code))
@@ -4134,11 +4163,19 @@ function GrimmorySync:extractAuthorsArray(data)
         or asArray(data)
 end
 
-function GrimmorySync:fetchAuthorsFromServer(token)
-    logger.info("[GrimmorySync] Fetching", self:serverName(), "authors for Bookshelf images")
+function GrimmorySync:fetchAuthorsFromServer(token, api_override, purpose)
+    logger.info(
+        "[GrimmorySync] Fetching",
+        self:serverName(),
+        "authors for",
+        purpose or "Bookshelf images"
+    )
     local headers = self:apiAuthHeaders(token)
     headers["accept"] = "application/json"
-    local api = self:provider().author_api
+    local api = api_override or self:provider().author_api
+    if type(api) ~= "table" or type(api.endpoint) ~= "string" then
+        return nil, _("The selected server does not provide an author API for this action.")
+    end
     local page = 0
     local page_size = api.page_size or 100
     local authors = {}
@@ -4191,9 +4228,9 @@ function GrimmorySync:authorHasPhoto(author)
     if value == nil then value = author.has_photo end
     if value == nil then value = author.photo end
     return value == true or value == "true" or value == 1 or value == "1"
-        or type(author.photoUrl) == "string"
-        or type(author.thumbnailUrl) == "string"
-        or type(author.imageUrl) == "string"
+        or (type(author.photoUrl) == "string" and author.photoUrl ~= "")
+        or (type(author.thumbnailUrl) == "string" and author.thumbnailUrl ~= "")
+        or (type(author.imageUrl) == "string" and author.imageUrl ~= "")
 end
 
 function GrimmorySync:authorDisplayName(author)
@@ -4202,6 +4239,278 @@ end
 
 function GrimmorySync:authorId(author)
     return author and (author.id or author.authorId)
+end
+
+function GrimmorySync:authorUploadMatchStems(author)
+    local stems, seen = {}, {}
+
+    local function addName(name)
+        name = trim(name)
+        if name == "" then return end
+
+        for _, stem in ipairs(self:authorImageStems(name)) do
+            local key = stem:lower()
+            if not seen[key] then
+                seen[key] = true
+                stems[#stems + 1] = stem
+            end
+        end
+
+        local surname, given_names = name:match("^([^,]+),%s*(.+)$")
+        if surname and given_names then
+            for _, stem in ipairs(self:authorImageStems(given_names .. " " .. surname)) do
+                local key = stem:lower()
+                if not seen[key] then
+                    seen[key] = true
+                    stems[#stems + 1] = stem
+                end
+            end
+        end
+    end
+
+    addName(self:authorDisplayName(author))
+    addName(author and (author.sortName or author.sort_name))
+    return stems
+end
+
+function GrimmorySync:fileSize(path)
+    local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
+    if ok_lfs and lfs then
+        local ok_attr, attr = pcall(lfs.attributes, path)
+        if ok_attr and attr and attr.mode == "file" and tonumber(attr.size) then
+            return tonumber(attr.size)
+        end
+    end
+
+    local file = io.open(path, "rb")
+    if not file then return nil end
+    local size = file:seek("end")
+    file:close()
+    return tonumber(size)
+end
+
+function GrimmorySync:localAuthorImageIndex()
+    local image_dir = self:authorImagesPath()
+    local ok_lfs, lfs = pcall(require, "libs/libkoreader-lfs")
+    if not ok_lfs or not lfs or type(lfs.dir) ~= "function" then
+        return nil, _("Could not list the Bookshelf author image directory.")
+    end
+
+    local attr = lfs.attributes(image_dir)
+    if not attr then
+        return { files = {}, by_stem = {} }, nil
+    end
+    if attr.mode ~= "directory" then
+        return nil, _("The Bookshelf author image path is not a directory.")
+    end
+
+    local allowed_extensions = {}
+    local extension_rank = {}
+    for rank, ext in ipairs(AUTHOR_IMAGE_EXTS) do
+        allowed_extensions[ext] = true
+        extension_rank[ext] = rank
+    end
+
+    local files = {}
+    local ok_dir, iterator, state = pcall(lfs.dir, image_dir)
+    if not ok_dir or type(iterator) ~= "function" then
+        return nil, tostring(iterator or _("Could not list the Bookshelf author image directory."))
+    end
+
+    while true do
+        local ok_next, filename = pcall(iterator, state)
+        if not ok_next then
+            if state and type(state.close) == "function" then pcall(state.close, state) end
+            return nil, tostring(filename)
+        end
+        if filename == nil then break end
+
+        if filename ~= "." and filename ~= ".." and filename:sub(1, 1) ~= "." then
+            local stem, extension = filename:match("^(.*)%.([^%.]+)$")
+            extension = extension and extension:lower()
+            if stem and stem ~= "" and allowed_extensions[extension] then
+                local path = image_dir .. "/" .. filename
+                local file_attr = lfs.attributes(path)
+                if file_attr and file_attr.mode == "file" and (not file_attr.size or file_attr.size > 0) then
+                    files[#files + 1] = {
+                        path = path,
+                        filename = filename,
+                        stem = stem,
+                        stem_key = stem:lower(),
+                        extension = extension,
+                        extension_rank = extension_rank[extension],
+                        size = tonumber(file_attr.size),
+                    }
+                end
+            end
+        end
+    end
+    if state and type(state.close) == "function" then pcall(state.close, state) end
+
+    table.sort(files, function(a, b)
+        if a.stem_key ~= b.stem_key then return a.stem_key < b.stem_key end
+        if a.extension_rank ~= b.extension_rank then return a.extension_rank < b.extension_rank end
+        return a.filename < b.filename
+    end)
+
+    local by_stem = {}
+    for _, image in ipairs(files) do
+        by_stem[image.stem_key] = by_stem[image.stem_key] or {}
+        by_stem[image.stem_key][#by_stem[image.stem_key] + 1] = image
+    end
+    return { files = files, by_stem = by_stem }, nil
+end
+
+function GrimmorySync:buildAuthorImageUploadPlan(authors, image_index)
+    image_index = image_index or { files = {}, by_stem = {} }
+    local ownership = {}
+    local author_stems = {}
+
+    for index, author in ipairs(authors or {}) do
+        local owner_key = tostring(self:authorId(author) or ("invalid:" .. tostring(index)))
+        local stems = self:authorUploadMatchStems(author)
+        author_stems[index] = stems
+        for _, stem in ipairs(stems) do
+            local key = stem:lower()
+            ownership[key] = ownership[key] or {}
+            ownership[key][owner_key] = true
+        end
+    end
+
+    local plan = {
+        queue = {},
+        authors = #(authors or {}),
+        local_files = #(image_index.files or {}),
+        existing = 0,
+        no_local = 0,
+        ambiguous = 0,
+        invalid = 0,
+        unmatched_local = 0,
+    }
+
+    for index, author in ipairs(authors or {}) do
+        local id = self:authorId(author)
+        local name = self:authorDisplayName(author)
+        if not id or tostring(id) == "" or name == "" then
+            plan.invalid = plan.invalid + 1
+        elseif self:authorHasPhoto(author) then
+            plan.existing = plan.existing + 1
+        else
+            local selected
+            local found_local = false
+            for _, stem in ipairs(author_stems[index] or {}) do
+                local key = stem:lower()
+                local images = image_index.by_stem and image_index.by_stem[key]
+                if images and #images > 0 then
+                    found_local = true
+                    local owner_count = 0
+                    for _ in pairs(ownership[key] or {}) do owner_count = owner_count + 1 end
+                    if owner_count == 1 then
+                        selected = images[1]
+                        break
+                    end
+                end
+            end
+
+            if selected then
+                plan.queue[#plan.queue + 1] = { author = author, image = selected }
+            elseif found_local then
+                plan.ambiguous = plan.ambiguous + 1
+            else
+                plan.no_local = plan.no_local + 1
+            end
+        end
+    end
+
+    for _, image in ipairs(image_index.files or {}) do
+        if not ownership[image.stem_key] then
+            plan.unmatched_local = plan.unmatched_local + 1
+        end
+    end
+    return plan
+end
+
+function GrimmorySync:authorImageContentType(extension)
+    extension = tostring(extension or ""):lower()
+    if extension == "jpg" or extension == "jpeg" then return "image/jpeg" end
+    if extension == "png" then return "image/png" end
+    if extension == "gif" then return "image/gif" end
+    if extension == "bmp" then return "image/bmp" end
+    if extension == "webp" then return "image/webp" end
+    if extension == "tif" or extension == "tiff" then return "image/tiff" end
+    return "application/octet-stream"
+end
+
+function GrimmorySync:uploadAuthorImage(author, image, token)
+    local provider = self:provider()
+    local id = self:authorId(author)
+    if type(provider.author_image_upload_path) ~= "function" then
+        return false, _("The selected server does not support author image uploads.")
+    end
+    if not id or tostring(id) == "" or not image or not image.path then
+        return false, _("Author image upload is missing an author id or local image.")
+    end
+
+    local size = tonumber(image.size) or self:fileSize(image.path)
+    if not size or size <= 0 then
+        return false, _("The local author image is empty or cannot be read.")
+    end
+    local max_bytes = tonumber(provider.author_image_upload_max_bytes)
+    if max_bytes and size > max_bytes then
+        return false, string.format(_("The local author image exceeds the %d MB server limit."), math.floor(max_bytes / 1024 / 1024))
+    end
+
+    local filename = tostring(image.filename or image.path:match("([^/]+)$") or "author-image")
+        :gsub("[\r\n\"]", "_")
+    local field_name = tostring(provider.author_image_upload_field or "file")
+        :gsub("[\r\n\"]", "_")
+    local boundary = "----LibrarySyncAuthor" .. tostring(id):gsub("[^%w]", "") .. tostring(os.time())
+    local preamble = "--" .. boundary .. "\r\n"
+        .. 'Content-Disposition: form-data; name="' .. field_name .. '"; filename="' .. filename .. '"\r\n'
+        .. "Content-Type: " .. self:authorImageContentType(image.extension) .. "\r\n\r\n"
+    local closing = "\r\n--" .. boundary .. "--\r\n"
+
+    local function sourceFactory()
+        local file, open_err = io.open(image.path, "rb")
+        if not file then return nil, open_err or _("Could not open local author image.") end
+        local phase = 1
+        return function()
+            if phase == 4 then return nil end
+            if self.abort_sync then
+                file:close()
+                phase = 4
+                return nil, ABORTED
+            end
+            if phase == 1 then
+                phase = 2
+                return preamble
+            end
+            if phase == 2 then
+                local chunk = file:read(32768)
+                if chunk then return chunk end
+                file:close()
+                phase = 3
+            end
+            if phase == 3 then
+                phase = 4
+                return closing
+            end
+            return nil
+        end
+    end
+
+    local headers = self:apiAuthHeaders(token)
+    headers["accept"] = "application/json"
+    headers["content-type"] = "multipart/form-data; boundary=" .. boundary
+    local _, err = self:httpRequest(self:buildServerUrl(provider.author_image_upload_path(id)), {
+        method = "POST",
+        headers = headers,
+        source_factory = sourceFactory,
+        content_length = #preamble + size + #closing,
+    })
+    if err then return false, err end
+    logger.info("[GrimmorySync] Uploaded local author image:", self:authorDisplayName(author), "<-", image.path)
+    return true, nil
 end
 
 function GrimmorySync:downloadAuthorImage(author, token)
@@ -4436,6 +4745,171 @@ function GrimmorySync:syncAuthorImagesAsync(done_callback)
     end
 
     UIManager:scheduleIn(PROGRESS_STEP_DELAY_S, step)
+end
+
+function GrimmorySync:showAuthorImageUploadSummary(plan, uploaded, failed, last_error, aborted)
+    self:closeProgressDialog()
+    local title = aborted and _("BookOrbit author image upload stopped.")
+        or _("BookOrbit author image upload complete.")
+    local message = string.format(
+        _("%s\n\nLocal image files: %d\nUploaded: %d\nAlready on server: %d\nNo local image: %d\nAmbiguous matches: %d\nInvalid author records: %d\nUnmatched local files: %d\nFailed: %d"),
+        title,
+        plan.local_files or 0,
+        uploaded or 0,
+        plan.existing or 0,
+        plan.no_local or 0,
+        plan.ambiguous or 0,
+        plan.invalid or 0,
+        plan.unmatched_local or 0,
+        failed or 0
+    )
+    if last_error and tostring(last_error) ~= "" and last_error ~= ABORTED then
+        message = message .. "\n\n" .. string.format(_("Last error: %s"), tostring(last_error))
+    end
+    UIManager:show(InfoMessage:new{
+        text = message,
+        timeout = 12,
+    })
+end
+
+function GrimmorySync:performAuthorImageUpload()
+    local provider = self:provider()
+    local function fail(message)
+        self:closeProgressDialog()
+        UIManager:show(InfoMessage:new{
+            text = string.format(_("Author image upload failed: %s"), tostring(message or _("unknown error"))),
+            timeout = 10,
+        })
+    end
+
+    self:showProgressDialog(_("Signing in to BookOrbit for author image upload..."))
+    local ok_login, token, login_err = pcall(function()
+        return self:loginToServerApi()
+    end)
+    if not ok_login then
+        fail(token)
+        return
+    end
+    if not token then
+        fail(login_err)
+        return
+    end
+    if self.abort_sync then return end
+
+    self:showProgressDialog(_("Fetching all authors from BookOrbit..."))
+    local ok_authors, authors, authors_err = pcall(function()
+        return self:fetchAuthorsFromServer(token, provider.author_upload_api, "Bookshelf image upload")
+    end)
+    if not ok_authors then
+        fail(authors)
+        return
+    end
+    if not authors then
+        fail(authors_err)
+        return
+    end
+    if self.abort_sync then return end
+
+    self:showProgressDialog(_("Matching local Bookshelf images to BookOrbit authors..."))
+    local ok_images, image_index, images_err = pcall(function()
+        return self:localAuthorImageIndex()
+    end)
+    if not ok_images then
+        fail(image_index)
+        return
+    end
+    if not image_index then
+        fail(images_err)
+        return
+    end
+
+    local plan = self:buildAuthorImageUploadPlan(authors, image_index)
+    if #plan.queue == 0 then
+        self:showAuthorImageUploadSummary(plan, 0, 0, nil, false)
+        return
+    end
+
+    local uploaded = 0
+    local failed = 0
+    local last_error
+    local index = 0
+
+    local function step()
+        if self.abort_sync then
+            self:showAuthorImageUploadSummary(plan, uploaded, failed, last_error, true)
+            return
+        end
+
+        index = index + 1
+        if index > #plan.queue then
+            self:showAuthorImageUploadSummary(plan, uploaded, failed, last_error, false)
+            return
+        end
+
+        local item = plan.queue[index]
+        self:showProgressDialog(string.format(
+            _("Uploading author image %d of %d...\n\n%s\n\nUploaded: %d\nFailed: %d\n\nTap Cancel to stop after the current image."),
+            index,
+            #plan.queue,
+            self:authorDisplayName(item.author),
+            uploaded,
+            failed
+        ))
+
+        UIManager:scheduleIn(PROGRESS_STEP_DELAY_S, function()
+            local upload_ok, upload_err = self:uploadAuthorImage(item.author, item.image, token)
+            if self.abort_sync or upload_err == ABORTED then
+                self:showAuthorImageUploadSummary(plan, uploaded, failed, upload_err, true)
+                return
+            end
+            if upload_ok then
+                uploaded = uploaded + 1
+            else
+                failed = failed + 1
+                last_error = upload_err
+                logger.warn("[GrimmorySync] Author image upload failed:", upload_err or "unknown")
+            end
+            UIManager:scheduleIn(PROGRESS_STEP_DELAY_S, step)
+        end)
+    end
+
+    UIManager:scheduleIn(PROGRESS_STEP_DELAY_S, step)
+end
+
+function GrimmorySync:startAuthorImageUpload()
+    if not self:configurationReady() then
+        self:promptConfiguration()
+        return
+    end
+
+    local provider = self:provider()
+    if type(provider.author_image_upload_path) ~= "function"
+        or type(provider.author_upload_api) ~= "table" then
+        UIManager:show(InfoMessage:new{
+            text = _("Author image upload is currently available only for BookOrbit."),
+            timeout = 4,
+        })
+        return
+    end
+
+    self.abort_sync = false
+    self.abort_notified = false
+    local confirm_dialog
+    confirm_dialog = ConfirmBox:new{
+        text = string.format(
+            _("Upload local Bookshelf author images to BookOrbit?\n\nImages will be read from:\n%s\n\nOnly authors without a BookOrbit image are updated. Ambiguous name matches are skipped, and existing server images are never overwritten. Your BookOrbit account needs permission to edit metadata."),
+            self:authorImagesPath()
+        ),
+        ok_text = _("Upload"),
+        cancel_text = _("Cancel"),
+        ok_callback = function()
+            pcall(function() UIManager:close(confirm_dialog) end)
+            UIManager:scheduleIn(0, function()
+                self:performAuthorImageUpload()
+            end)
+        end,
+    }
+    UIManager:show(confirm_dialog)
 end
 
 function GrimmorySync:apiMetadataWarning(error)

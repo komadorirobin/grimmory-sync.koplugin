@@ -17,6 +17,7 @@ package.preload["grimmory_updater"] = function() return {} end
 local decoded_json = {}
 local fake_files = {}
 local fake_dirs = {}
+local fake_dir_entries = {}
 package.preload["json"] = function()
     return { decode = function(body) return decoded_json[body] end }
 end
@@ -34,6 +35,14 @@ package.preload["libs/libkoreader-lfs"] = function()
         mkdir = function(path)
             fake_dirs[path] = true
             return true
+        end,
+        dir = function(path)
+            local entries = fake_dir_entries[path] or {}
+            local index = 0
+            return function()
+                index = index + 1
+                return entries[index]
+            end
         end,
     }
 end
@@ -106,6 +115,8 @@ assert(Providers.get("grimmory").api_credentials_separate == true)
 assert(Providers.get("bookorbit").book_api.endpoint == "/api/v1/books/query")
 assert(Providers.get("bookorbit").api_credentials_separate == true)
 assert(Providers.get("bookorbit").api_fallback_to_opds_credentials == true)
+assert(Providers.get("bookorbit").author_upload_api.endpoint:match("hasPhoto") == nil)
+assert(Providers.get("bookorbit").author_image_upload_path(17) == "/api/v1/authors/17/image")
 
 local redirected, redirect_err = plugin:httpRequest("http://redirect.example.com/api/v1/auth/login", {
     method = "POST",
@@ -297,8 +308,10 @@ assert(parsed_books[1].download_url == "/api/v1/opds/42/download?fileId=9")
 local bookorbit = Providers.get("bookorbit")
 local original_book_page_size = bookorbit.book_api.page_size
 local original_author_page_size = bookorbit.author_api.page_size
+local original_upload_author_page_size = bookorbit.author_upload_api.page_size
 bookorbit.book_api.page_size = 2
 bookorbit.author_api.page_size = 2
+bookorbit.author_upload_api.page_size = 2
 decoded_json["book-page-0"] = { items = { { id = 1 }, { id = 2 } }, total = 3 }
 decoded_json["book-page-1"] = { items = { { id = 3 } }, total = 3 }
 decoded_json["author-page-0"] = { items = { { id = 1 }, { id = 2 } }, total = 3 }
@@ -316,8 +329,110 @@ local api_books = assert(plugin:fetchBookMetadataFromServerApi("token"))
 local api_authors = assert(plugin:fetchAuthorsFromServer("token"))
 assert(#api_books == 3)
 assert(#api_authors == 3)
+local upload_api_authors = assert(plugin:fetchAuthorsFromServer(
+    "token",
+    bookorbit.author_upload_api,
+    "test upload"
+))
+assert(#upload_api_authors == 3)
 bookorbit.book_api.page_size = original_book_page_size
 bookorbit.author_api.page_size = original_author_page_size
+bookorbit.author_upload_api.page_size = original_upload_author_page_size
+
+local author_image_dir = "/library/.bookshelf-images/authors"
+fake_dirs[author_image_dir] = true
+fake_dir_entries[author_image_dir] = { ".", "..", ".temporary", "notes.txt", "Isaac Asimov.jpg" }
+fake_files[author_image_dir .. "/Isaac Asimov.jpg"] = true
+local indexed_author_images = assert(plugin:localAuthorImageIndex())
+assert(#indexed_author_images.files == 1)
+assert(indexed_author_images.files[1].stem_key == "isaac asimov")
+local asimov_image = indexed_author_images.files[1]
+local upload_plan = plugin:buildAuthorImageUploadPlan({
+    { id = 10, name = "Isaac Asimov", sortName = "Asimov, Isaac", hasPhoto = false },
+    { id = 11, name = "Frank Herbert", hasPhoto = true },
+    { id = 12, name = "No Local Image", hasPhoto = false },
+}, {
+    files = indexed_author_images.files,
+    by_stem = indexed_author_images.by_stem,
+})
+assert(#upload_plan.queue == 1)
+assert(upload_plan.queue[1].author.id == 10)
+assert(upload_plan.existing == 1)
+assert(upload_plan.no_local == 1)
+assert(upload_plan.ambiguous == 0)
+
+local ambiguous_plan = plugin:buildAuthorImageUploadPlan({
+    { id = 20, name = "Shared Name", hasPhoto = false },
+    { id = 21, name = "Shared Name", hasPhoto = false },
+}, {
+    files = {
+        {
+            path = "/library/.bookshelf-images/authors/Shared Name.jpg",
+            filename = "Shared Name.jpg",
+            stem = "Shared Name",
+            stem_key = "shared name",
+            extension = "jpg",
+            size = 4,
+        },
+    },
+    by_stem = {
+        ["shared name"] = {
+            {
+                path = "/library/.bookshelf-images/authors/Shared Name.jpg",
+                filename = "Shared Name.jpg",
+                stem = "Shared Name",
+                stem_key = "shared name",
+                extension = "jpg",
+                size = 4,
+            },
+        },
+    },
+})
+assert(#ambiguous_plan.queue == 0)
+assert(ambiguous_plan.ambiguous == 2)
+
+local upload_image_path = os.tmpname() .. ".jpg"
+local upload_image_file = assert(io.open(upload_image_path, "wb"))
+assert(upload_image_file:write("JPEG"))
+upload_image_file:close()
+local captured_upload
+plugin.httpRequest = function(_, url, options)
+    local source, source_err = options.source_factory()
+    assert(source, tostring(source_err))
+    local chunks = {}
+    while true do
+        local chunk, chunk_err = source()
+        assert(not chunk_err, tostring(chunk_err))
+        if not chunk then break end
+        chunks[#chunks + 1] = chunk
+    end
+    captured_upload = {
+        url = url,
+        method = options.method,
+        headers = options.headers,
+        body = table.concat(chunks),
+        content_length = options.content_length,
+    }
+    return "{}", nil
+end
+plugin.abort_sync = false
+local upload_ok, upload_err = plugin:uploadAuthorImage({ id = 10, name = "Isaac Asimov" }, {
+    path = upload_image_path,
+    filename = "Isaac Asimov.jpg",
+    extension = "jpg",
+    size = 4,
+}, "upload-token")
+pcall(os.remove, upload_image_path)
+assert(upload_ok == true, tostring(upload_err))
+assert(captured_upload.url == "https://books.example.com/api/v1/authors/10/image")
+assert(captured_upload.method == "POST")
+assert(captured_upload.headers.authorization == "Bearer upload-token")
+assert(captured_upload.headers["content-type"]:match("multipart/form%-data"))
+assert(captured_upload.body:match('name="file"'))
+assert(captured_upload.body:match('filename="Isaac Asimov%.jpg"'))
+assert(captured_upload.body:match("Content%-Type: image/jpeg"))
+assert(captured_upload.body:match("JPEG", 1, true))
+assert(captured_upload.content_length == #captured_upload.body)
 
 package.loaded["json"] = nil
 package.loaded["dkjson"] = nil
